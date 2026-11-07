@@ -152,6 +152,10 @@ function cmdService(projectArg: string) {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>60</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
+  <key>LowPriorityBackgroundIO</key><true/>
   <key>StandardOutPath</key><string>${join(logDir, 'service.log')}</string>
   <key>StandardErrorPath</key><string>${join(logDir, 'service.log')}</string>
 </dict></plist>
@@ -163,7 +167,7 @@ function cmdService(projectArg: string) {
 Start:   launchctl bootstrap gui/$(id -u) ${path}
 Stop:    launchctl bootout gui/$(id -u)/${label}
 Logs:    tail -f ${join(logDir, 'service.log')}
-It restarts after crashes and at login, and keeps the Mac awake while running (not with the lid closed on battery).`);
+It runs at background priority (efficiency cores, low disk priority, so it stays cool), restarts after crashes and at login, and keeps the Mac awake while running (not with the lid closed on battery).`);
 }
 
 async function main(argv: string[]) {
