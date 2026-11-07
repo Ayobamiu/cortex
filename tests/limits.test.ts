@@ -30,3 +30,8 @@ test("a worker's own HTTP throttling is NOT a provider limit", () => {
   assert.equal(detectRateLimit('Too many requests from GDELT, retrying', now), undefined);
   assert.equal(detectRateLimit('tests failed: 3 errors', now), undefined);
 });
+
+test('billing / payment failures rest the agent for hours instead of failing the work', () => {
+  assert.equal(detectRateLimit('API error 402: Billing verification failed (request_id x)', now), now + 3 * 3600e3);
+  assert.equal(detectRateLimit('Your credit balance is too low to access the API', now), now + 3 * 3600e3);
+});

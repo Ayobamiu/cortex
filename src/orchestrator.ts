@@ -114,7 +114,10 @@ export class Orchestrator {
       if (!tasks.length && !this.reasons.length) this.reasons.push({ text: 'Initial plan: break the goal into tasks.', failure: false });
 
       // Planning happens between launches so the planner sees a consistent picture.
-      if (this.reasons.length) {
+      // Planning happens when the planner is available. If it's resting after a usage limit, the
+      // reasons wait and ready work keeps running on other agents meanwhile (a checkpoint review
+      // must never stall the whole run).
+      if (this.reasons.length && (!tasks.length || this.agentFor('plan', 1))) {
         await this.plan();
         continue;
       }
@@ -143,6 +146,12 @@ export class Orchestrator {
 
       // Work is ready but every agent that could do it is resting after a usage limit.
       if (resting) {
+        await sleep(Math.max(1000, Math.min(this.nextWake() - Date.now(), this.pollMs * 10)));
+        continue;
+      }
+
+      // Nothing running and nothing launchable while replanning waits for a resting planner.
+      if (this.reasons.length) {
         await sleep(Math.max(1000, Math.min(this.nextWake() - Date.now(), this.pollMs * 10)));
         continue;
       }

@@ -9,11 +9,17 @@ const LIMIT_RE =
   /(usage limit (reached|exceeded)|hit your (usage )?limit|5-hour limit|weekly limit|rate_limit_error|quota (exceeded|exhausted)|out of (extra )?usage|you've reached your .*limit)/i;
 
 const DEFAULT_WAIT_MS = 30 * 60000;
+
+// The account can't be used at all (billing, payment). Not the agent's fault either, and not
+// fixed by waiting minutes: rest it for hours and let the owner fix the account.
+const ACCOUNT_RE = /(API error 402|billing verification failed|payment required|insufficient (credits|balance|funds)|credit balance is too low)/i;
+const ACCOUNT_WAIT_MS = 3 * 3600e3;
 /** Never retry sooner than this after a limit (overridable for tests). */
 const floor = () => Number(process.env.CORTEX_LIMIT_FLOOR_MS ?? 60000);
 
 /** Returns when to retry (ms epoch), or undefined if the text doesn't look like a usage limit. */
 export function detectRateLimit(text: string, now = Date.now()): number | undefined {
+  if (text && ACCOUNT_RE.test(text)) return now + ACCOUNT_WAIT_MS;
   if (!text || !LIMIT_RE.test(text)) return undefined;
 
   // Claude Code: "Claude AI usage limit reached|1793930400"

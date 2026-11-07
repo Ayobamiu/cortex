@@ -260,3 +260,29 @@ test('with no working judge at all, the attempt is retried later without countin
   assert.equal(store.task('nojudge', 'n')?.status, 'passed', 'only 1 attempt allowed: the unjudged one must not have counted');
   assert.equal(store.countEvents('nojudge', 'attempt.judge_unavailable'), 1);
 });
+
+test('a checkpoint review waiting for a resting planner does not stall ready work', async () => {
+  const tasks = [
+    { key: 'a', title: 'a', kind: 'code', brief: 'WRITE a.txt 1', deps: [], evals: [{ kind: 'command', run: 'test -f a.txt' }] },
+    { key: 'b', title: 'b', kind: 'code', brief: 'WRITE b.txt 1', deps: ['a'], evals: [{ kind: 'command', run: 'test -f b.txt' }] },
+    { key: 'c', title: 'c', kind: 'code', brief: 'WRITE c.txt 1', deps: ['b'], evals: [{ kind: 'command', run: 'test -f c.txt' }] },
+  ];
+  let calls = 0;
+  let wakeAt = 0;
+  const p = mem('planner', 'p0', (req) => {
+    calls++;
+    if (calls === 1) return ok('', { structured: { tasks, cancel: [], notes: 'plan' } });
+    if (calls === 2) {
+      wakeAt = Date.now() + 1500; // the checkpoint review hits the planner's usage limit
+      return { ok: false, output: '', costUsd: 0, error: 'limit', rateLimited: { untilMs: wakeAt } };
+    }
+    return ok('', { structured: { tasks: [], cancel: [], notes: 'no changes' } });
+  });
+  const { store, orch } = setup('stall', { planner: p, w: worker('w', 'p1') }, {
+    routing: { plan: 'planner', code: 'w', judge: 'planner' }, checkpoint_every: 1,
+  });
+  assert.equal(await orch.run(), 'done');
+  const cStarted = Date.parse(store.events('stall', 1000, 'attempt.started').find((e) => e.task_id === 'c')!.ts);
+  assert.ok(cStarted < wakeAt, 'work continued while the planner rested');
+  assert.ok(calls >= 3, 'the deferred review still ran once the planner woke');
+});
