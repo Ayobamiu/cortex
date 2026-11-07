@@ -103,7 +103,9 @@ function cmdAnswer(goalId: string, taskId: string, text: string) {
   const store = openStore(goalId);
   const t = store.task(goalId, taskId);
   if (!t) throw new Error(`no task ${taskId} in ${goalId}`);
-  if (t.status !== 'needs_human' && t.status !== 'failed') throw new Error(`task ${taskId} is ${t.status}, not waiting on you`);
+  // A question can be answered before it's asked (while its research is still running).
+  const early = t.kind === 'human' && t.status === 'pending';
+  if (t.status !== 'needs_human' && t.status !== 'failed' && !early) throw new Error(`task ${taskId} is ${t.status}, not waiting on you`);
   store.tx(() => {
     if (t.kind === 'human') {
       store.updateTask(goalId, taskId, { status: 'passed', human_answer: text, summary: `Human answered: ${text}` });

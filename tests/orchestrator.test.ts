@@ -209,3 +209,28 @@ test('a judge that cannot be independent of the first is skipped, not duplicated
   assert.equal(await orch.run(), 'done');
   assert.equal(calls.length, 2, 'one judge per criterion when only one provider exists');
 });
+
+test('a question is asked only after the research it depends on has passed', async () => {
+  const tasks = [
+    { key: 'res', title: 'res', kind: 'research', brief: 'WRITE findings.md 1', deps: [], evals: [{ kind: 'command', run: 'test -f findings.md' }] },
+    { key: 'ask', title: 'ask', kind: 'human', brief: 'Read findings.md and decide', deps: ['res'], evals: [] },
+    { key: 'use', title: 'use', kind: 'code', brief: 'WRITE use.txt 1', deps: ['ask'], evals: [{ kind: 'command', run: 'test -f use.txt' }] },
+  ];
+  let askedWhileResearchPending = false;
+  const { store, orch } = setup('gate', {
+    planner: planner(tasks),
+    w: mem('w', 'p1', (req) => {
+      if (store.task('gate', 'ask')?.status === 'needs_human') askedWhileResearchPending = true;
+      doBrief(req);
+      return ok();
+    }),
+  }, { routing: { plan: 'planner', code: 'w', research: 'w', judge: 'planner' } });
+  const done = orch.run();
+  for (let i = 0; i < 500 && store.goal('gate')?.status !== 'blocked'; i++) await sleep(20);
+  assert.equal(askedWhileResearchPending, false, 'the question must wait for its research');
+  assert.equal(store.task('gate', 'res')?.status, 'passed');
+  assert.equal(store.task('gate', 'ask')?.status, 'needs_human');
+  assert.equal(store.countEvents('gate', 'question.asked'), 1);
+  store.updateTask('gate', 'ask', { status: 'passed', human_answer: 'go', summary: 'Human answered: go' });
+  assert.equal(await done, 'done');
+});

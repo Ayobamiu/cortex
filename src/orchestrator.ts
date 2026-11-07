@@ -117,8 +117,9 @@ export class Orchestrator {
       }
 
       this.maybeCheckpoint(tasks);
+      await this.askReadyQuestions(tasks);
 
-      const ready = tasks.filter((t) => t.status === 'pending' && !this.running.has(t.id) && this.depsSatisfied(t, tasks));
+      const ready = tasks.filter((t) => t.status === 'pending' && t.kind !== 'human' && !this.running.has(t.id) && this.depsSatisfied(t, tasks));
       let resting = 0;
       for (const t of ready) {
         if (this.running.size >= this.concurrency) break;
@@ -172,6 +173,15 @@ export class Orchestrator {
         );
       }
       await sleep(this.pollMs);
+    }
+  }
+
+  /** A question for the human is asked only once the work it depends on (e.g. the research it cites) has passed. */
+  private async askReadyQuestions(tasks: Task[]) {
+    for (const h of tasks.filter((t) => t.kind === 'human' && t.status === 'pending' && this.depsSatisfied(t, tasks))) {
+      this.store.updateTask(this.id, h.id, { status: 'needs_human' });
+      this.store.event(this.id, 'question.asked', {}, h.id);
+      await this.notifier.send('needs_human', `Question (${h.id}); other work continues`, `${h.brief}\n  → cortex answer ${this.id} ${h.id} "<your answer>"`);
     }
   }
 
@@ -485,7 +495,7 @@ export class Orchestrator {
         const risk: TaskRisk = RISKS.includes(nt.risk as TaskRisk) ? (nt.risk as TaskRisk) : 'normal';
         this.store.insertTask({
           id, goal_id: this.id, title: nt.title, kind, brief: nt.brief, deps, evals, agent: null, risk,
-          status: kind === 'human' ? 'needs_human' : 'pending',
+          status: 'pending', // human questions are asked by askReadyQuestions once their deps pass
         });
         added.push(id);
       }
@@ -497,10 +507,6 @@ export class Orchestrator {
     });
 
     await this.notifier.send('info', `Plan updated: +${added.length} task(s), −${cancelled.length}`, head(out.notes ?? '', 500));
-    const humans = this.store.tasks(this.id).filter((t) => added.includes(t.id) && t.status === 'needs_human');
-    for (const h of humans) {
-      await this.notifier.send('needs_human', `Question (${h.id}); other work continues`, `${h.brief}\n  → cortex answer ${this.id} ${h.id} "<your answer>"`);
-    }
   }
 
   /** Out of automatic options: park the problem as a question for the human. Only its dependents wait. */
@@ -607,6 +613,12 @@ export class Orchestrator {
       this.store.updateTask(this.id, t.id, { status: 'pending' });
       // Not the agent's fault: doesn't count toward retries.
       this.store.event(this.id, 'attempt.interrupted', { attempt: t.attempts }, t.id);
+    }
+    // A question asked before the work it depends on had passed (older cortex versions) goes back to waiting.
+    const all = this.store.tasks(this.id);
+    for (const h of all.filter((t) => t.kind === 'human' && t.status === 'needs_human' && !t.human_answer && t.deps.length && !this.depsSatisfied(t, all))) {
+      this.store.updateTask(this.id, h.id, { status: 'pending' });
+      this.store.event(this.id, 'question.deferred', { reason: 'dependencies not passed yet' }, h.id);
     }
     // Usage readings and usage-limit rests survive restarts.
     for (const e of this.store.events(this.id, 500, 'agent.usage')) {
