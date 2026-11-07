@@ -1,0 +1,20 @@
+{
+  "name": "cortex",
+  "version": "0.1.0",
+  "description": "Long-running, multi-provider agent orchestrator: goal -> task DAG -> attempts -> evals -> decisions",
+  "type": "module",
+  "bin": {
+    "cortex": "bin/cortex.mjs"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --no-warnings --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "id": "my-project",
+  "objective": "Describe the big goal in a few sentences: what exists when this is done, and for whom.",
+  "context_files": ["SPEC.md"],
+  "acceptance": [
+    { "kind": "command", "run": "npm test" },
+    { "kind": "judge", "criterion": "Every requirement in SPEC.md is implemented and covered by a passing test." }
+  ],
+  "agents": {
+    "claude": { "adapter": "claude", "model": "opus", "permission_mode": "auto" },
+    "claude-fast": { "adapter": "claude", "model": "sonnet" },
+    "muse": { "adapter": "muse" }
+  },
+  "routing": {
+    "plan": "claude",
+    "code": ["muse", "claude"],
+    "research": ["claude", "muse"],
+    "review": "claude",
+    "judge": ["claude-fast", "muse"]
+  },
+  "budget": {
+    "usd_total": 40,
+    "usd_per_attempt": 3,
+    "max_attempts_per_task": 3,
+    "max_replans": 8,
+    "max_hours": 72,
+    "attempt_timeout_min": 60
+  },
+  "concurrency": 2,
+  "checkpoint_every": 5,
+  "notify": { "macos": true }
+}
