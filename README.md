@@ -70,11 +70,13 @@ Everything cortex runs for an agent runs inside a macOS `sandbox-exec` profile (
 
 | | Allowed | Blocked |
 |---|---|---|
-| **Write** | the attempt's worktree and its git admin dir; agent CLI state and caches (`~/.claude`, `~/.cursor`, `~/.config/muse`, `~/.cache`, uv, npm) | the rest of the home folder, your project checkout, git refs and tags, agent binaries (`~/.local/bin`, CLI `versions/`). The planner writes nothing. |
+| **Write** | the attempt's worktree and its git admin dir; agent CLI state and caches (`~/.claude`, `~/.cursor`, `~/.config/muse`, `~/.cache`, uv, npm) | the rest of the home folder, your project checkout, git refs and tags, agent binaries (`~/.local/bin`, CLI `versions/`), and anything your own tools later run outside the sandbox (Claude Code settings, hooks, skills, agents, commands and plugins; Cursor MCP config and rules; shell rc files; `.gitconfig`; LaunchAgents). The planner writes nothing. |
 | **Read** | the system, the project, the run's logs | credentials (`~/.ssh`, `~/.aws`, `~/.config/gh`, cloud CLIs, `.npmrc`, `.netrc`…), browser profiles, Mail/Messages, shell history, `~/Documents`, `~/Desktop`, `~/Downloads`, other goals' state |
 | **Other** | the network (research needs it) | the SSH agent socket. Env vars named like secrets (`*TOKEN*`, `*API_KEY*`…) are dropped, and auto-updates are off. |
 
-Known limit: the login keychain stays reachable, because Claude, Muse and Cursor keep their logins there.
+Known limits:
+- The login keychain stays reachable, because Claude, Muse and Cursor keep their logins there.
+- `~/.claude.json` and `~/.cursor/cli-config.json` stay writable, because the CLIs rewrite them on every run. The first can register MCP servers, which a separate config dir per agent would close.
 
 Configure it per goal:
 
@@ -97,7 +99,7 @@ If a judge can't produce a verdict (it crashes, its config is wrong, it asks for
 ## Development
 
 ```sh
-npm test          # 37 tests with fake agents and fake CLIs, sandboxed (no API spend)
+npm test          # 38 tests with fake agents and fake CLIs, sandboxed (no API spend)
 npm run typecheck
 ```
 

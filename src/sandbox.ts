@@ -44,6 +44,19 @@ const WRITABLE_STATE = [
   'Library/Application Support/Cursor', 'Library/Logs',
 ];
 
+/**
+ * Inside the writable agent state: files that make *your* tools run code later, outside any
+ * sandbox (Claude Code settings and hooks, skills, agents, commands, plugins, MCP configs).
+ * An agent must never be able to plant something there.
+ */
+const WRITE_DENY = [
+  '.claude/settings.json', '.claude/settings.local.json', '.claude/CLAUDE.md', '.claude/hooks', '.claude/skills',
+  '.claude/agents', '.claude/commands', '.claude/plugins', '.claude/output-styles', '.claude/keybindings.json',
+  '.cursor/mcp.json', '.cursor/rules', '.config/muse/config.toml', '.config/muse/skills', '.codex',
+  '.zshrc', '.zprofile', '.zshenv', '.bashrc', '.bash_profile', '.profile', '.gitconfig', '.config/git',
+  'Library/LaunchAgents',
+];
+
 /** Credentials and personal data. Relative to the home directory. */
 const READ_DENY = [
   '.ssh', '.aws', '.azure', '.docker', '.kube', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.git-credentials',
@@ -82,6 +95,7 @@ export function buildProfile(spec: SandboxSpec, cfg: SandboxConfig = {}): string
     // Writes: nowhere in the home folder or the project's own git repo, except the allowed places.
     `(deny file-write* (subpath ${q(HOME)}))`,
     `(allow file-write* ${writable.map((p) => `(subpath ${q(p)})`).join(' ')})`,
+    `(deny file-write* ${WRITE_DENY.map((p) => `(subpath ${q(h(p))})`).join(' ')})`,
     // Reads: credentials, personal files and other goals' state are hidden...
     // file-read-data, not file-read*: paths can still be looked up (git stats parent folders),
     // but file contents and directory listings can't be read.

@@ -52,3 +52,15 @@ test('the profile never makes agent binaries writable, and can be disabled', () 
   assert.doesNotMatch(profile, /\.local\/share\/claude"/);
   assert.equal(makeSandbox({ writable: [], readable: [] }, { enabled: false }), undefined);
 });
+
+test("agents can't plant code that your own tools run later (hooks, settings, shell rc, LaunchAgents)", { skip }, async () => {
+  const sb = makeSandbox({ writable: [], readable: [] })!;
+  const probe = `cortex-sbx-test-${process.pid}`;
+  for (const target of [`${H}/.claude/hooks/${probe}`, `${H}/.claude/settings.json`, `${H}/Library/LaunchAgents/${probe}.plist`, `${H}/.zshrc`]) {
+    const p = await sh(`touch '${target}'`, { sandbox: sb, timeoutMs: 20000 });
+    assert.notEqual(p.code, 0, `${target} must not be writable`);
+  }
+  assert.equal(existsSync(`${H}/.claude/hooks/${probe}`), false);
+  // ...while the CLI's own session state stays writable.
+  assert.equal((await sh(`touch '${H}/.claude/${probe}' && rm '${H}/.claude/${probe}'`, { sandbox: sb, timeoutMs: 20000 })).code, 0);
+});
