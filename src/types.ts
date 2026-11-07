@@ -60,6 +60,8 @@ export interface GoalConfig {
   notify?: { macos?: boolean; webhook?: string };
   /** Branch the integration branch is created from. Default: current HEAD. */
   base_branch?: string;
+  /** OS sandbox for agents and eval commands (macOS). On by default; see cortex/src/sandbox.ts. */
+  sandbox?: import('./sandbox.ts').SandboxConfig;
   /** Paths no task may change (directories end with /). Checked on every attempt. */
   protected_paths?: string[];
   /**
@@ -94,6 +96,10 @@ export interface EvalOutcome {
   feedback: string;
   /** A judge hit its usage limit: the verdict is unknown, so the attempt must not count. */
   rateLimited?: { agent: string; untilMs: number };
+  /** Judges that couldn't produce a verdict (crashed, misconfigured). Not the worker's fault. */
+  brokenJudges?: string[];
+  /** No working judge was left: the verdict is unknown, so the attempt must not count. */
+  judgeUnavailable?: boolean;
 }
 
 /** One provider usage window as reported by the agent CLI (e.g. Claude's five_hour / seven_day). */

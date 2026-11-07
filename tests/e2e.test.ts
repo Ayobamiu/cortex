@@ -36,6 +36,8 @@ function setup(id: string, scenario: string, overrides: Partial<GoalConfig> = {}
     budget: { usd_total: 5, max_attempts_per_task: 3 },
     concurrency: 2,
     notify: { macos: false },
+    // The fake agents live in ~/Documents, which the sandbox hides unless declared readable.
+    sandbox: { extra_readable: [fx] },
     ...overrides,
   };
   const stateDir = join(root, 'state');

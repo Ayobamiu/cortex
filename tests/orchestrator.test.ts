@@ -234,3 +234,29 @@ test('a question is asked only after the research it depends on has passed', asy
   store.updateTask('gate', 'ask', { status: 'passed', human_answer: 'go', summary: 'Human answered: go' });
   assert.equal(await done, 'done');
 });
+
+test("a judge that can't give a verdict is replaced by another judge and never charged to the worker", async () => {
+  const tasks = [{ key: 'j', title: 'j', kind: 'code', brief: 'WRITE j.txt 1', deps: [], evals: [{ kind: 'judge', criterion: 'good' }] }];
+  const calls: string[] = [];
+  const { store, orch } = setup('broken', {
+    planner: planner(tasks), w: worker('w', 'p1'),
+    flaky: mem('flaky', 'p2', () => (calls.push('flaky'), { ok: false, output: '', costUsd: 0, error: 'Workspace Trust Required' })),
+    solid: mem('solid', 'p3', () => (calls.push('solid'), ok('', { structured: { pass: true, reason: 'ok' } }))),
+  }, { routing: { plan: 'planner', code: 'w', judge: ['flaky', 'solid'] }, budget: { max_attempts_per_task: 1 } });
+  assert.equal(await orch.run(), 'done');
+  assert.equal(store.task('broken', 'j')?.attempts, 1, 'passed on its only attempt despite the broken judge');
+  assert.deepEqual(calls, ['flaky', 'solid']);
+  assert.equal(store.countEvents('broken', 'judge.broken'), 1);
+});
+
+test('with no working judge at all, the attempt is retried later without counting', async () => {
+  const tasks = [{ key: 'n', title: 'n', kind: 'code', brief: 'WRITE n.txt 1', deps: [], evals: [{ kind: 'judge', criterion: 'good' }] }];
+  let fixed = false;
+  const { store, orch } = setup('nojudge', {
+    planner: planner(tasks), w: worker('w', 'p1'),
+    only: mem('only', 'p2', () => (fixed ? ok('', { structured: { pass: true, reason: 'ok' } }) : ((fixed = true), { ok: false, output: '', costUsd: 0, error: 'crashed' }))),
+  }, { routing: { plan: 'planner', code: 'w', judge: 'only' }, budget: { max_attempts_per_task: 1 } });
+  assert.equal(await orch.run(), 'done');
+  assert.equal(store.task('nojudge', 'n')?.status, 'passed', 'only 1 attempt allowed: the unjudged one must not have counted');
+  assert.equal(store.countEvents('nojudge', 'attempt.judge_unavailable'), 1);
+});

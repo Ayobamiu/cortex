@@ -25,7 +25,7 @@ export function cursorAgent(name: string, spec: AgentSpec): Agent {
       const args = ['-p', '--output-format', 'json', '--model', spec.model ?? 'auto'];
       args.push(...(spec.extra_args ?? []));
 
-      const p = await run('cursor-agent', args, { cwd: req.cwd, input: prompt, timeoutMs: req.timeoutMs });
+      const p = await run('cursor-agent', args, { cwd: req.cwd, input: prompt, timeoutMs: req.timeoutMs, sandbox: req.sandbox });
       writeLog(req.logFile, { args: args.join(' '), prompt, stdout: p.stdout, stderr: p.stderr });
 
       let res: any;

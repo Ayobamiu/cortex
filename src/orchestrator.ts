@@ -7,6 +7,7 @@ import { Workspace } from './workspace.ts';
 import { Notifier } from './notify.ts';
 import { runEvals, type JudgeContext } from './evals.ts';
 import { INTEGRITY_CRITERION, runGuards } from './guards.ts';
+import { makeSandbox, type Sandbox } from './sandbox.ts';
 import { PLAN_SCHEMA, planPrompt, workerPrompt, type PlanOutput } from './prompts.ts';
 import { head, sleep, tail } from './proc.ts';
 
@@ -39,6 +40,7 @@ export class Orchestrator {
   private store: Store;
   private goal: GoalConfig;
   private stateDir: string;
+  private projectDir: string;
   private ws: Workspace;
   private notifier: Notifier;
   private agents: Record<string, Agent>;
@@ -64,6 +66,7 @@ export class Orchestrator {
     this.store = o.store;
     this.goal = o.goal;
     this.stateDir = o.stateDir;
+    this.projectDir = o.projectDir;
     this.pollMs = o.pollMs ?? 30000;
     this.ws = new Workspace(o.projectDir, o.goal.id, o.stateDir, o.goal.base_branch);
     this.notifier = new Notifier(o.goal.id, o.stateDir, o.goal.notify);
@@ -202,7 +205,7 @@ export class Orchestrator {
    * toward retries or agent fallback. Capped, so a misdetected limit can't loop forever.
    */
   private countedAttempts(task: Task, attempt: number): number {
-    const free = this.store.countTaskEvents(this.id, task.id, ['attempt.rate_limited', 'attempt.interrupted']);
+    const free = this.store.countTaskEvents(this.id, task.id, ['attempt.rate_limited', 'attempt.interrupted', 'attempt.judge_unavailable']);
     return Math.max(1, attempt - Math.min(free, 6));
   }
 
@@ -223,7 +226,9 @@ export class Orchestrator {
       if (wt.carried) this.store.event(this.id, 'attempt.carried_forward', { attempt, from: attempt - 1 }, task.id);
       const tasks = this.store.tasks(this.id);
       const deps = tasks.filter((t) => task.deps.includes(t.id));
+      const sandbox = await this.sandboxFor(wt.dir, true);
       const res = await agent.run({
+        sandbox,
         prompt: workerPrompt(this.goal, task, deps, counted, this.maxAttempts, wt.carried),
         cwd: wt.dir,
         timeoutMs: this.attemptTimeoutMs,
@@ -257,9 +262,11 @@ export class Orchestrator {
           const evals = [...(this.goal.task_checks ?? []), ...this.evalsFor(task.evals, risk)];
           outcome = await runEvals(evals, dir, this.judgeCtx(task, agent, res.output, () => this.ws.diff(dir), `${task.id}-${attempt}`), {
             judges: risk === 'high' ? 2 : 1,
+            sandbox,
           });
         }
         if (outcome.rateLimited) limited = outcome.rateLimited;
+        for (const name of outcome.brokenJudges ?? []) this.judgeBroke(name, outcome.feedback);
       }
       if (outcome.pass) {
         const merged = await this.ws.merge(wt.branch, `cortex: merge ${task.id} — ${task.title}`);
@@ -273,6 +280,12 @@ export class Orchestrator {
       if (wt) await this.ws.removeAttempt(wt.dir).catch(() => {});
     }
 
+    if (outcome.judgeUnavailable) {
+      // Nobody could judge the work: unknown, not failed. Retry later without spending an attempt.
+      this.store.event(this.id, 'attempt.judge_unavailable', { attempt, why: head(outcome.feedback, 1500) }, task.id);
+      this.store.updateTask(this.id, task.id, { status: 'pending' });
+      return;
+    }
     if (limited) {
       // Work is committed on the attempt branch and carries into the next attempt. Feedback is left as it was.
       this.coolDown(limited.agent, limited.untilMs);
@@ -318,6 +331,13 @@ export class Orchestrator {
 
   private cooling(name: string): boolean {
     return (this.cooldowns.get(name) ?? 0) > Date.now();
+  }
+
+  /** A judge that failed to produce a verdict rests for 30 minutes so it doesn't stall every review. */
+  private judgeBroke(name: string, why: string) {
+    if (this.cooling(name)) return;
+    this.store.event(this.id, 'judge.broken', { agent: name, why: head(why, 1500) });
+    this.coolDown(name, Date.now() + 30 * 60000, `couldn't produce a verdict; other judges review instead for 30 min. Check its config/logs`);
   }
 
   /** Records the usage windows every agent call reports, so limits are seen coming. */
@@ -388,12 +408,14 @@ export class Orchestrator {
    * and prefer agents under the soft usage limit. `exclude` holds providers that already judged
    * this criterion: a second judge must be independent of the first, else there is none.
    */
-  private pickJudge(workerProvider: string | undefined, exclude: string[]): Agent | undefined {
+  private pickJudge(workerProvider: string | undefined, exclude: string[], excludeAgents: string[] = []): Agent | undefined {
     const names = [this.goal.routing.judge ?? this.goal.routing.plan ?? []].flat().filter((n) => this.agents[n]);
     const all = (names.length ? names : Object.keys(this.agents)).map((n) => this.agents[n]);
     const awake = all.filter((a) => !this.cooling(a.name));
-    const pool = (awake.length ? awake : all).filter((a) => !exclude.includes(a.provider));
-    if (!pool.length) return exclude.length ? undefined : all[0];
+    const usable = all.filter((a) => !excludeAgents.includes(a.name));
+    const awakeUsable = awake.filter((a) => !excludeAgents.includes(a.name));
+    const pool = (awakeUsable.length ? awakeUsable : usable).filter((a) => !exclude.includes(a.provider));
+    if (!pool.length) return undefined;
     const rank = (a: Agent) => (a.provider === workerProvider ? 2 : 0) + (this.pressure(a.name) >= this.softLimit ? 1 : 0);
     return [...pool].sort((a, b) => rank(a) - rank(b))[0];
   }
@@ -406,7 +428,7 @@ export class Orchestrator {
 
   private judgeCtx(task: Task | null, worker: Agent | null, summary: string, diff: () => Promise<string>, label: string): JudgeContext {
     return {
-      pickJudge: (exclude) => this.pickJudge(worker?.provider, exclude),
+      pickJudge: (exclude, excludeAgents) => this.pickJudge(worker?.provider, exclude, excludeAgents),
       record: (a, usd) => this.store.addCost(this.id, task?.id ?? null, 'judge', a.name, usd),
       logFile: (l) => this.logFile(`${label}-${l}`),
       taskContext: task ? `Goal: ${this.goal.objective}\n\nTask: ${task.title}\n${task.brief}` : `Goal: ${this.goal.objective}\n\n(Final acceptance of the whole goal.)`,
@@ -439,6 +461,7 @@ export class Orchestrator {
       log = await this.ws.integrationLog();
     } catch {}
     const res = await planner.run({
+      sandbox: await this.sandboxFor(this.ws.integrationDir, false),
       prompt: planPrompt(this.goal, tasks, reasons.map((r) => r.text), log, this.store.spent(this.id)),
       cwd: this.ws.integrationDir,
       timeoutMs: 20 * 60000,
@@ -532,11 +555,18 @@ export class Orchestrator {
       this.goal.acceptance,
       this.ws.integrationDir,
       this.judgeCtx(null, null, 'See integration history.', () => this.ws.integrationLog(100), 'acceptance'),
+      { sandbox: await this.sandboxFor(this.ws.integrationDir, true) },
     );
     if (outcome.rateLimited) {
       // Verdict unknown: rest the judge and try acceptance again later, without counting a failure.
       this.coolDown(outcome.rateLimited.agent, outcome.rateLimited.untilMs);
       await sleep(Math.min(outcome.rateLimited.untilMs - Date.now(), this.pollMs * 10));
+      return false;
+    }
+    for (const name of outcome.brokenJudges ?? []) this.judgeBroke(name, outcome.feedback);
+    if (outcome.judgeUnavailable) {
+      await this.notifier.send('warn', 'Final acceptance: no working judge; retrying later', head(outcome.feedback, 500));
+      await sleep(this.pollMs * 10);
       return false;
     }
     this.store.event(this.id, 'acceptance', { pass: outcome.pass, feedback: head(outcome.feedback, 4000) });
@@ -628,6 +658,16 @@ export class Orchestrator {
       const until = Date.parse(String(e.data.until));
       if (until > Date.now()) this.cooldowns.set(String(e.data.agent), until);
     }
+  }
+
+  /**
+   * The sandbox for work in `dir`. Writable: the directory and its git admin dir (or nothing,
+   * for the read-only planner). Readable: the project (its .git holds the objects) and the run's
+   * logs (Muse reads its prompt from there). Everything else follows sandbox.ts.
+   */
+  private async sandboxFor(dir: string, write: boolean): Promise<Sandbox | undefined> {
+    const writable = write ? [dir, await this.ws.gitDir(dir)] : [];
+    return makeSandbox({ writable, readable: [dir, this.projectDir, join(this.stateDir, 'logs')] }, this.goal.sandbox);
   }
 
   private logFile(label: string): string {

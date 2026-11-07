@@ -55,7 +55,7 @@ State lives in `~/.cortex/goals/<goal>/`: `state.db`, `logs/` (full transcript o
 |---|---|---|
 | `claude` | `claude -p --output-format stream-json`, structured output via `--json-schema` | yes (`total_cost_usd`), plus usage-window utilization |
 | `muse` | `muse exec --json --workspace <worktree>` | no (bounded by attempts and time) |
-| `cursor` | `cursor-agent -p --output-format json --model auto`. As a read-only judge: `"extra_args": ["--mode", "ask"]`. Write access needs a permission flag you add yourself | no |
+| `cursor` | `cursor-agent -p --output-format json --model auto`. As a read-only judge: `"extra_args": ["--mode", "ask", "--trust"]` (`--trust` skips the per-folder trust prompt). Write access needs a permission flag you add yourself | no |
 | `command` | any shell command; prompt on stdin, answer on stdout | optional `CORTEX_COST_USD=<n>` last line |
 
 For Codex: `{ "adapter": "command", "command": "codex exec -", "provider": "openai" }`.
@@ -64,14 +64,40 @@ For Codex: `{ "adapter": "command", "command": "codex exec -", "provider": "open
 
 macOS notifications for warnings, questions, checkpoints and completion. Set `notify.webhook` to POST JSON events (with a `text` field, so a Slack incoming webhook works directly).
 
-## Security note
+## Sandbox (macOS)
 
-Workers run unattended with write access to their worktree. Claude defaults to `permission_mode: "auto"`, where risky actions are blocked rather than prompted. Agents still run as your user on your laptop, so keep secrets out of reach of projects you point cortex at. Cursor's `--sandbox enabled` did not stop writes outside the workspace when combined with `--force` (tested), so don't rely on it.
+Everything cortex runs for an agent runs inside a macOS `sandbox-exec` profile (`src/sandbox.ts`), on by default. That covers agent CLIs, judges, the planner, and eval commands, since evals execute code the agents wrote.
+
+| | Allowed | Blocked |
+|---|---|---|
+| **Write** | the attempt's worktree and its git admin dir; agent CLI state and caches (`~/.claude`, `~/.cursor`, `~/.config/muse`, `~/.cache`, uv, npm) | the rest of the home folder, your project checkout, git refs and tags, agent binaries (`~/.local/bin`, CLI `versions/`). The planner writes nothing. |
+| **Read** | the system, the project, the run's logs | credentials (`~/.ssh`, `~/.aws`, `~/.config/gh`, cloud CLIs, `.npmrc`, `.netrc`…), browser profiles, Mail/Messages, shell history, `~/Documents`, `~/Desktop`, `~/Downloads`, other goals' state |
+| **Other** | the network (research needs it) | the SSH agent socket. Env vars named like secrets (`*TOKEN*`, `*API_KEY*`…) are dropped, and auto-updates are off. |
+
+Known limit: the login keychain stays reachable, because Claude, Muse and Cursor keep their logins there.
+
+Configure it per goal:
+
+```json
+"sandbox": {
+  "extra_writable": [],
+  "extra_readable": ["Documents/shared-data"],
+  "extra_read_deny": [],
+  "pass_env": ["NEEDED_TOKEN"],
+  "enabled": true
+}
+```
+
+Tested with real Claude, Muse and Cursor runs. Cursor's own `--sandbox enabled` did *not* stop writes outside the workspace when combined with `--force`, so cortex doesn't rely on it.
+
+## Judges that break
+
+If a judge can't produce a verdict (it crashes, its config is wrong, it asks for input), another judge reviews instead, and the broken one rests for 30 minutes. If no working judge is left, the attempt is retried later without counting against the worker. A broken reviewer never fails good work.
 
 ## Development
 
 ```sh
-npm test          # 30 tests with fake agents and fake CLIs (no API spend)
+npm test          # 37 tests with fake agents and fake CLIs, sandboxed (no API spend)
 npm run typecheck
 ```
 

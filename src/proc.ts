@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
+import type { Sandbox } from './sandbox.ts';
 
 /** Every descendant pid of `root`. Agents (e.g. Muse) put their tool commands in new process groups, so a group kill alone misses them. */
 function descendants(root: number): number[] {
@@ -36,14 +37,17 @@ export interface ProcOptions {
   input?: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  /** Run inside this macOS sandbox, with its scrubbed environment instead of ours. */
+  sandbox?: Sandbox;
 }
 
 /** Runs a process in its own process group so a timeout kills the whole tree (agents spawn children). */
 export function run(cmd: string, args: string[], opts: ProcOptions = {}): Promise<ProcResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
+    const [file, argv] = opts.sandbox ? ['/usr/bin/sandbox-exec', ['-p', opts.sandbox.profile, cmd, ...args]] : [cmd, args];
+    const child = spawn(file, argv, {
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env },
+      env: { ...(opts.sandbox?.env ?? process.env), ...opts.env },
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

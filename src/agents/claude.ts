@@ -21,7 +21,7 @@ export function claudeAgent(name: string, spec: AgentSpec): Agent {
       if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
       args.push(...(spec.extra_args ?? []));
 
-      const p = await run('claude', args, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs });
+      const p = await run('claude', args, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs, sandbox: req.sandbox });
       writeLog(req.logFile, { args: args.join(' '), prompt: req.prompt, stdout: p.stdout, stderr: p.stderr });
 
       const { result: res, usage, rejectedUntil } = parseStream(p.stdout);

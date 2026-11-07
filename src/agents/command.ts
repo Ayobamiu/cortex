@@ -15,7 +15,7 @@ export function commandAgent(name: string, spec: AgentSpec): Agent {
     provider: spec.provider ?? name,
     async run(req) {
       const env = req.jsonSchema ? { CORTEX_JSON_SCHEMA: JSON.stringify(req.jsonSchema) } : {};
-      const p = await sh(spec.command!, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs, env });
+      const p = await sh(spec.command!, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs, env, sandbox: req.sandbox });
       writeLog(req.logFile, { command: spec.command!, prompt: req.prompt, stdout: p.stdout, stderr: p.stderr });
       let output = p.stdout;
       let costUsd = 0;

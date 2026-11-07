@@ -28,7 +28,7 @@ export function museAgent(name: string, spec: AgentSpec): Agent {
       if (spec.effort) args.push('--effort', spec.effort);
       args.push(...(spec.extra_args ?? []));
 
-      const p = await run('muse', args, { cwd: req.cwd, timeoutMs: req.timeoutMs });
+      const p = await run('muse', args, { cwd: req.cwd, timeoutMs: req.timeoutMs, sandbox: req.sandbox });
       writeLog(req.logFile, { args: args.join(' '), stdout: p.stdout, stderr: p.stderr });
 
       let output = '';

@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AgentSpec, UsageWindow } from '../types.ts';
+import type { Sandbox } from '../sandbox.ts';
 import { claudeAgent } from './claude.ts';
 import { museAgent } from './muse.ts';
 import { commandAgent } from './command.ts';
@@ -15,6 +16,8 @@ export interface RunRequest {
   jsonSchema?: object;
   /** Raw transcript goes here, for debugging a run after the fact. */
   logFile: string;
+  /** OS sandbox the agent process runs in (see sandbox.ts). */
+  sandbox?: Sandbox;
 }
 
 export interface RunResult {

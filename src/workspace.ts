@@ -103,6 +103,11 @@ export class Workspace {
     return true;
   }
 
+  /** The worktree's private git directory (index, HEAD) inside the project's .git. */
+  async gitDir(dir: string): Promise<string> {
+    return (await git(dir, 'rev-parse', '--absolute-git-dir')).trim();
+  }
+
   /** The integration commit an attempt is measured against. */
   async base(dir: string): Promise<string> {
     return (await git(dir, 'merge-base', 'HEAD', this.integrationBranch)).trim();
