@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AgentSpec } from '../types.ts';
+import type { AgentSpec, UsageWindow } from '../types.ts';
 import { claudeAgent } from './claude.ts';
 import { museAgent } from './muse.ts';
 import { commandAgent } from './command.ts';
@@ -26,6 +26,8 @@ export interface RunResult {
   error?: string;
   /** The provider's usage window is exhausted: not the agent's fault, retry after untilMs. */
   rateLimited?: { untilMs: number };
+  /** How full the provider's usage windows are, when the CLI reports it (Claude does). */
+  usage?: UsageWindow[];
 }
 
 /** One coding/research agent CLI. Every provider is reduced to this interface. */

@@ -32,6 +32,7 @@ ${depCtx ? `\n# Results of earlier tasks you build on\n${depCtx}\n` : ''}${task.
 - You are in a git worktree on a dedicated branch. Work only inside this directory. Cortex commits everything you leave behind, so don't worry about git.
 - ${contextFiles(goal)}
 - Keep the change focused on this task. Don't redo other tasks' work.
+- Automatic guards fail any attempt that commits a credential or a file over 50 MB${goal.protected_paths?.length ? `, or changes a protected path (${goal.protected_paths.join(', ')})` : ''}. Deleting tests triggers an extra integrity review.
 - Research tasks: write findings into files in the repo, and cite a source URL for every factual claim. Mark anything unverified as such.
 - Finish with a short summary: what you did, what you found, and anything later tasks must know. This summary is passed on to them.`;
 }
@@ -47,6 +48,7 @@ export const PLAN_SCHEMA = {
           key: { type: 'string', description: 'short kebab-case id, unique' },
           title: { type: 'string' },
           kind: { type: 'string', enum: ['code', 'research', 'review', 'redteam', 'human'] },
+          risk: { type: 'string', enum: ['low', 'normal', 'high'], description: 'how much review attempts get' },
           brief: { type: 'string', description: 'self-contained instructions; for kind=human, the question for the user' },
           deps: { type: 'array', items: { type: 'string' }, description: 'keys of new tasks or ids of existing tasks' },
           evals: {
@@ -72,7 +74,7 @@ export const PLAN_SCHEMA = {
 } as const;
 
 export interface PlanOutput {
-  tasks: { key: string; title: string; kind: Task['kind']; brief: string; deps: string[]; evals: EvalSpec[] }[];
+  tasks: { key: string; title: string; kind: Task['kind']; risk?: Task['risk']; brief: string; deps: string[]; evals: EvalSpec[] }[];
   cancel: string[];
   notes: string;
 }
@@ -114,6 +116,10 @@ ${integrationLog || '(none)'}
 - Each task should be completable by one agent in under ~1 hour, with a self-contained brief (the agent sees only the goal, its brief, and its deps' summaries).
 - Every code/research/review task needs at least one eval. Prefer command evals (tests, scripts, file checks) over judge evals. For research, use a judge eval like "every claim in research/X.md cites a source and the sources support it".
 - Kinds: "code" builds, "research" gathers and cites, "review" audits, "redteam" attacks what builders made (tries to game, break or disprove it). Redteam runs on a different provider than the builders, so never label adversarial work "code".
+- Risk sets how much review each attempt gets, so spend review where mistakes are costly:
+  - "low": command checks only, no reviewer. For notes, docs, logbook entries, isolated scripts and exploratory research whose output later tasks verify anyway. Give low tasks command evals.
+  - "normal" (default): command checks, then one independent reviewer per judge criterion.
+  - "high": two reviewers from different providers per criterion, plus an integrity review (no gamed tests, no fabricated data). For core logic, scoring or anything the final acceptance depends on, data provenance, security, and red-team fixes.
 - Use kind "human" only when progress truly requires the user's decision or credentials. Its brief is the question. Only tasks that depend on it wait; everything else continues.
 - A failed task has exhausted its retries. Cancel it and add a different approach (smaller steps, different method), or add a "human" task if it's genuinely blocked. If you cancel a task, tasks depending on it proceed without it, so cancel or replace those too if needed.
 - On a checkpoint review: check the plan still serves the goal. Cancel drifting or pointless pending tasks; add missing ones. Returning no changes is fine.

@@ -1,11 +1,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Store } from './db.ts';
-import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Role, Task, TaskKind } from './types.ts';
+import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Role, Task, TaskKind, TaskRisk, UsageWindow } from './types.ts';
 import { makeAgent, type Agent } from './agents/index.ts';
 import { Workspace } from './workspace.ts';
 import { Notifier } from './notify.ts';
 import { runEvals, type JudgeContext } from './evals.ts';
+import { INTEGRITY_CRITERION, runGuards } from './guards.ts';
 import { PLAN_SCHEMA, planPrompt, workerPrompt, type PlanOutput } from './prompts.ts';
 import { head, sleep, tail } from './proc.ts';
 
@@ -26,6 +27,7 @@ export interface OrchestratorOptions {
 }
 
 const KINDS: TaskKind[] = ['code', 'research', 'review', 'redteam', 'human'];
+const RISKS: TaskRisk[] = ['low', 'normal', 'high'];
 const CONFLICT_MSG = 'Your change passed its checks but conflicted with work another task merged meanwhile.';
 
 /**
@@ -44,6 +46,10 @@ export class Orchestrator {
   private running = new Map<string, Promise<void>>();
   /** agent name -> ms epoch when its usage limit resets. */
   private cooldowns = new Map<string, number>();
+  /** agent name -> latest provider usage windows it reported. */
+  private usage = new Map<string, UsageWindow[]>();
+  private softLimit: number;
+  private hardLimit: number;
   private reasons: Reason[] = [];
   private planFailures = 0;
   private notifiedBlocked = false;
@@ -61,7 +67,10 @@ export class Orchestrator {
     this.pollMs = o.pollMs ?? 30000;
     this.ws = new Workspace(o.projectDir, o.goal.id, o.stateDir, o.goal.base_branch);
     this.notifier = new Notifier(o.goal.id, o.stateDir, o.goal.notify);
-    this.agents = o.agents ?? Object.fromEntries(Object.entries(o.goal.agents).map(([n, s]) => [n, makeAgent(n, s)]));
+    const raw = o.agents ?? Object.fromEntries(Object.entries(o.goal.agents).map(([n, s]) => [n, makeAgent(n, s)]));
+    this.agents = Object.fromEntries(Object.entries(raw).map(([n, a]) => [n, this.instrument(a)]));
+    this.softLimit = o.goal.limits?.soft ?? 0.85;
+    this.hardLimit = o.goal.limits?.hard ?? 0.97;
     const b = o.goal.budget ?? {};
     this.maxAttempts = b.max_attempts_per_task ?? 3;
     this.maxReplans = b.max_replans ?? 8;
@@ -226,7 +235,20 @@ export class Orchestrator {
         outcome = { pass: false, feedback: `The agent run failed (${agent.name}): ${res.error}${timeoutHint}\nPartial output:\n${tail(res.output, 1500)}` };
       } else {
         const dir = wt.dir;
-        outcome = await runEvals([...(this.goal.task_checks ?? []), ...task.evals], dir, this.judgeCtx(task, agent, res.output, () => this.ws.diff(dir), `${task.id}-${attempt}`));
+        const guards = await runGuards(dir, await this.ws.base(dir), this.goal.protected_paths);
+        if (guards.problems.length) {
+          outcome = { pass: false, feedback: `Cortex guard checks failed:\n${guards.problems.map((p) => `- ${p}`).join('\n')}` };
+        } else {
+          let risk = task.risk;
+          if (guards.escalate.length && risk !== 'high') {
+            risk = 'high';
+            this.store.event(this.id, 'attempt.escalated_review', { attempt, why: guards.escalate }, task.id);
+          }
+          const evals = [...(this.goal.task_checks ?? []), ...this.evalsFor(task.evals, risk)];
+          outcome = await runEvals(evals, dir, this.judgeCtx(task, agent, res.output, () => this.ws.diff(dir), `${task.id}-${attempt}`), {
+            judges: risk === 'high' ? 2 : 1,
+          });
+        }
         if (outcome.rateLimited) limited = outcome.rateLimited;
       }
       if (outcome.pass) {
@@ -262,6 +284,19 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * low: only command checks (unless the task has none, so something still checks it).
+   * high: every criterion plus the integrity review (judged twice by runEvals).
+   */
+  private evalsFor(evals: EvalSpec[], risk: TaskRisk): EvalSpec[] {
+    if (risk === 'low') {
+      const commands = evals.filter((e) => e.kind === 'command');
+      return commands.length ? commands : evals;
+    }
+    if (risk === 'high') return [...evals, { kind: 'judge', criterion: INTEGRITY_CRITERION }];
+    return evals;
+  }
+
   private depsSatisfied(t: Task, all: Task[]): boolean {
     return t.deps.every((d) => {
       const dep = all.find((x) => x.id === d);
@@ -275,10 +310,49 @@ export class Orchestrator {
     return (this.cooldowns.get(name) ?? 0) > Date.now();
   }
 
-  private coolDown(name: string, untilMs: number) {
+  /** Records the usage windows every agent call reports, so limits are seen coming. */
+  private instrument(a: Agent): Agent {
+    return {
+      name: a.name,
+      provider: a.provider,
+      run: async (req) => {
+        const res = await a.run(req);
+        if (res.usage?.length) this.noteUsage(a.name, res.usage);
+        return res;
+      },
+    };
+  }
+
+  private noteUsage(name: string, windows: UsageWindow[]) {
+    const before = this.pressure(name);
+    this.usage.set(name, windows);
+    this.store.event(this.id, 'agent.usage', { agent: name, windows });
+    const now = this.pressure(name);
+    const top = this.fullest(name);
+    if (!top) return;
+    const resets = new Date(top.resetsAtMs).toLocaleString();
+    if (now >= this.hardLimit) {
+      this.coolDown(name, top.resetsAtMs + 60000, `${Math.round(now * 100)}% of its ${top.window} window used; resting it until it resets (${resets}) before it hits the limit`);
+    } else if (now >= this.softLimit && before < this.softLimit) {
+      void this.notifier.send('info', `${name} is at ${Math.round(now * 100)}% of its ${top.window} window; sending new work to fallback agents until ${resets}`);
+    }
+  }
+
+  /** The agent's fullest usage window that hasn't reset yet. */
+  private fullest(name: string): UsageWindow | undefined {
+    return (this.usage.get(name) ?? [])
+      .filter((w) => w.resetsAtMs > Date.now())
+      .sort((a, b) => b.utilization - a.utilization)[0];
+  }
+
+  private pressure(name: string): number {
+    return this.fullest(name)?.utilization ?? 0;
+  }
+
+  private coolDown(name: string, untilMs: number, why?: string) {
     this.cooldowns.set(name, untilMs);
-    this.store.event(this.id, 'agent.cooldown', { agent: name, until: new Date(untilMs).toISOString() });
-    void this.notifier.send('info', `${name} hit its usage limit; resting it until ${new Date(untilMs).toLocaleTimeString()} (not counted as a failure)`);
+    this.store.event(this.id, 'agent.cooldown', { agent: name, until: new Date(untilMs).toISOString(), anticipated: !!why });
+    void this.notifier.send('info', why ? `${name}: ${why}` : `${name} hit its usage limit; resting it until ${new Date(untilMs).toLocaleTimeString()} (not counted as a failure)`);
   }
 
   /**
@@ -291,18 +365,27 @@ export class Orchestrator {
     );
     if (!names.length) names = Object.keys(this.agents);
     const start = Math.min(Math.floor((attempt - 1) / 2), names.length - 1);
-    const order = [...names.slice(start), ...names.slice(0, start)];
-    const name = order.find((n) => !this.cooling(n));
+    const order = [...names.slice(start), ...names.slice(0, start)].filter((n) => !this.cooling(n));
+    // Planning is small and essential: it may use an agent up to the hard limit. Work moves to
+    // fallbacks at the soft limit, but if every candidate is past it, use the least loaded.
+    const soft = role === 'plan' ? this.hardLimit : this.softLimit;
+    const name = order.find((n) => this.pressure(n) < soft) ?? [...order].sort((a, b) => this.pressure(a) - this.pressure(b))[0];
     return name ? this.agents[name] : undefined;
   }
 
-  /** Judges come from a different provider than the worker whenever possible, and never a resting agent. */
-  private pickJudge(workerProvider?: string): Agent {
+  /**
+   * Judges come from a different provider than the worker whenever possible, are never resting,
+   * and prefer agents under the soft usage limit. `exclude` holds providers that already judged
+   * this criterion: a second judge must be independent of the first, else there is none.
+   */
+  private pickJudge(workerProvider: string | undefined, exclude: string[]): Agent | undefined {
     const names = [this.goal.routing.judge ?? this.goal.routing.plan ?? []].flat().filter((n) => this.agents[n]);
     const all = (names.length ? names : Object.keys(this.agents)).map((n) => this.agents[n]);
     const awake = all.filter((a) => !this.cooling(a.name));
-    const candidates = awake.length ? awake : all;
-    return candidates.find((a) => a.provider !== workerProvider) ?? candidates[0];
+    const pool = (awake.length ? awake : all).filter((a) => !exclude.includes(a.provider));
+    if (!pool.length) return exclude.length ? undefined : all[0];
+    const rank = (a: Agent) => (a.provider === workerProvider ? 2 : 0) + (this.pressure(a.name) >= this.softLimit ? 1 : 0);
+    return [...pool].sort((a, b) => rank(a) - rank(b))[0];
   }
 
   /** Soonest moment a resting agent wakes up (for sleeping when everything is rate-limited). */
@@ -313,7 +396,7 @@ export class Orchestrator {
 
   private judgeCtx(task: Task | null, worker: Agent | null, summary: string, diff: () => Promise<string>, label: string): JudgeContext {
     return {
-      pickJudge: () => this.pickJudge(worker?.provider),
+      pickJudge: (exclude) => this.pickJudge(worker?.provider, exclude),
       record: (a, usd) => this.store.addCost(this.id, task?.id ?? null, 'judge', a.name, usd),
       logFile: (l) => this.logFile(`${label}-${l}`),
       taskContext: task ? `Goal: ${this.goal.objective}\n\nTask: ${task.title}\n${task.brief}` : `Goal: ${this.goal.objective}\n\n(Final acceptance of the whole goal.)`,
@@ -399,8 +482,9 @@ export class Orchestrator {
         const kind: TaskKind = KINDS.includes(nt.kind) ? nt.kind : 'code';
         const deps = (nt.deps ?? []).map((d) => keyToId.get(d) ?? d).filter((d) => taken.has(d) && d !== id);
         const evals = (nt.evals ?? []).filter((e: EvalSpec) => (e.kind === 'command' && e.run) || (e.kind === 'judge' && e.criterion));
+        const risk: TaskRisk = RISKS.includes(nt.risk as TaskRisk) ? (nt.risk as TaskRisk) : 'normal';
         this.store.insertTask({
-          id, goal_id: this.id, title: nt.title, kind, brief: nt.brief, deps, evals, agent: null,
+          id, goal_id: this.id, title: nt.title, kind, brief: nt.brief, deps, evals, agent: null, risk,
           status: kind === 'human' ? 'needs_human' : 'pending',
         });
         added.push(id);
@@ -524,7 +608,10 @@ export class Orchestrator {
       // Not the agent's fault: doesn't count toward retries.
       this.store.event(this.id, 'attempt.interrupted', { attempt: t.attempts }, t.id);
     }
-    // Usage-limit rests survive restarts.
+    // Usage readings and usage-limit rests survive restarts.
+    for (const e of this.store.events(this.id, 500, 'agent.usage')) {
+      this.usage.set(String(e.data.agent), e.data.windows as UsageWindow[]);
+    }
     for (const e of this.store.events(this.id, 200, 'agent.cooldown')) {
       const until = Date.parse(String(e.data.until));
       if (until > Date.now()) this.cooldowns.set(String(e.data.agent), until);

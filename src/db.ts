@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS goals (
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT NOT NULL, goal_id TEXT NOT NULL, title TEXT NOT NULL, kind TEXT NOT NULL, brief TEXT NOT NULL,
-  deps TEXT NOT NULL, evals TEXT NOT NULL, agent TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  deps TEXT NOT NULL, evals TEXT NOT NULL, agent TEXT, status TEXT NOT NULL, risk TEXT NOT NULL DEFAULT 'normal',
+  attempts INTEGER NOT NULL DEFAULT 0,
   feedback TEXT, summary TEXT, human_answer TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   PRIMARY KEY (goal_id, id)
 );
@@ -35,6 +36,7 @@ function toTask(r: Row): Task {
     ...(r as unknown as Task),
     deps: JSON.parse(r.deps as string),
     evals: JSON.parse(r.evals as string),
+    risk: (r.risk as Task['risk']) ?? 'normal',
   };
 }
 
@@ -56,6 +58,9 @@ export class Store {
     // WAL + busy timeout so `cortex answer` / `cortex status` can touch the DB while a run is live.
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
     this.db.exec(SCHEMA);
+    // Databases created before task risk levels existed.
+    const cols = this.db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'risk')) this.db.exec("ALTER TABLE tasks ADD COLUMN risk TEXT NOT NULL DEFAULT 'normal'");
   }
 
   tx<T>(fn: () => T): T {
@@ -122,14 +127,15 @@ export class Store {
     this.event(id, 'goal.status', { status, reason });
   }
 
-  insertTask(t: Omit<Task, 'created_at' | 'updated_at' | 'attempts' | 'feedback' | 'summary' | 'human_answer'>) {
+  insertTask(t: Omit<Task, 'created_at' | 'updated_at' | 'attempts' | 'feedback' | 'summary' | 'human_answer' | 'risk'> & { risk?: Task['risk'] }) {
+    const risk = t.risk ?? 'normal';
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal_id, title, kind, brief, deps, evals, agent, status, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        `INSERT INTO tasks (id, goal_id, title, kind, brief, deps, evals, agent, status, risk, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       )
-      .run(t.id, t.goal_id, t.title, t.kind, t.brief, JSON.stringify(t.deps), JSON.stringify(t.evals), t.agent, t.status, now(), now());
-    this.event(t.goal_id, 'task.created', { title: t.title, kind: t.kind, deps: t.deps, status: t.status }, t.id);
+      .run(t.id, t.goal_id, t.title, t.kind, t.brief, JSON.stringify(t.deps), JSON.stringify(t.evals), t.agent, t.status, risk, now(), now());
+    this.event(t.goal_id, 'task.created', { title: t.title, kind: t.kind, deps: t.deps, status: t.status, risk }, t.id);
   }
 
   updateTask(goalId: string, id: string, patch: Partial<Pick<Task, 'status' | 'attempts' | 'feedback' | 'summary' | 'human_answer'>>) {

@@ -103,6 +103,11 @@ export class Workspace {
     return true;
   }
 
+  /** The integration commit an attempt is measured against. */
+  async base(dir: string): Promise<string> {
+    return (await git(dir, 'merge-base', 'HEAD', this.integrationBranch)).trim();
+  }
+
   /** What this attempt changed relative to the integration tip it started from. */
   async diff(dir: string, maxChars = 30000): Promise<string> {
     const base = await git(dir, 'merge-base', 'HEAD', this.integrationBranch);

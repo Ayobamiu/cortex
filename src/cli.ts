@@ -84,8 +84,16 @@ function cmdStatus(goalId?: string) {
     }
     console.log(`\n${id} · ${g.status} · $${store.spent(id).toFixed(2)} spent · ${g.project_dir}`);
     console.log(`  ${g.config.objective.slice(0, 140)}`);
+    // Latest provider usage per agent, as last reported (only windows that haven't reset).
+    const latest = new Map<string, { window: string; utilization: number; resetsAtMs: number }[]>();
+    for (const e of store.events(id, 500, 'agent.usage')) latest.set(String(e.data.agent), e.data.windows as any);
+    for (const [agent, windows] of latest) {
+      const live = windows.filter((w) => w.resetsAtMs > Date.now());
+      if (live.length) console.log(`  usage ${agent}: ${live.map((w) => `${w.window} ${Math.round(w.utilization * 100)}% (resets ${new Date(w.resetsAtMs).toLocaleString()})`).join(' · ')}`);
+    }
     for (const t of store.tasks(id)) {
-      console.log(`  ${t.status.padEnd(11)} ${t.id.padEnd(32)} ${t.kind.padEnd(8)} a=${t.attempts}  ${t.title.slice(0, 70)}`);
+      const risk = t.risk && t.risk !== 'normal' ? ` [${t.risk}]` : '';
+      console.log(`  ${t.status.padEnd(11)} ${t.id.padEnd(32)} ${t.kind.padEnd(8)} a=${t.attempts}  ${t.title.slice(0, 70)}${risk}`);
       if (t.status === 'needs_human') console.log(`              ↳ ${t.brief.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
   }

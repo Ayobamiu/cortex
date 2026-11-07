@@ -19,6 +19,17 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
 - **Decisions:** a failed task retries up to `max_attempts_per_task`, getting the failure as feedback. Every 2 failures it switches to the next agent in the routing list. Once out of retries, the planner re-plans. After `max_replans` it escalates to you.
 - **Autonomy:** fully unattended between checkpoints. A question for you (a `human` task) blocks **only the tasks that depend on it**; everything else keeps running. Every `checkpoint_every` passed tasks, you get a digest and the planner reviews whether the plan has drifted from the goal. Neither of these pauses the run.
 - **Invariants:** `task_checks` run on every attempt before the task's own evals. Use them for rules like "the frozen contract is unchanged", so tampering is caught immediately instead of at the end.
+- **Review by risk:** the planner gives each task a risk level, so review is spent where mistakes are costly.
+  - `low`: command checks only, no judge.
+  - `normal`: one judge per criterion.
+  - `high`: two judges from different providers per criterion, plus an integrity review (no gamed tests, no fabricated data).
+- **Guards** run on every attempt, are free, and need no model:
+  - A leaked credential, a file over 50 MB, or a change to `protected_paths` fails the attempt.
+  - A deleted test raises that attempt to high-risk review instead of failing it.
+- **Usage anticipation:** Claude reports how full its 5-hour and weekly windows are on every call, and `cortex status` shows it.
+  - Past `limits.soft` (default 85%), new work goes to fallback agents. Planning may still use the agent.
+  - At `limits.hard` (97%), the agent rests until the window resets, before it hits the wall.
+  - A limit that is hit anyway (any provider) rests the agent without counting as a failure.
 - **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours`, a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
 
 ## Use
@@ -42,8 +53,9 @@ State lives in `~/.cortex/goals/<goal>/`: `state.db`, `logs/` (full transcript o
 
 | adapter | how it runs | cost tracking |
 |---|---|---|
-| `claude` | `claude -p --output-format json`, structured output via `--json-schema` | yes (`total_cost_usd`) |
+| `claude` | `claude -p --output-format stream-json`, structured output via `--json-schema` | yes (`total_cost_usd`), plus usage-window utilization |
 | `muse` | `muse exec --json --workspace <worktree>` | no (bounded by attempts and time) |
+| `cursor` | `cursor-agent -p --output-format json --model auto`. As a read-only judge: `"extra_args": ["--mode", "ask"]`. Write access needs a permission flag you add yourself | no |
 | `command` | any shell command; prompt on stdin, answer on stdout | optional `CORTEX_COST_USD=<n>` last line |
 
 For Codex: `{ "adapter": "command", "command": "codex exec -", "provider": "openai" }`.
@@ -54,12 +66,12 @@ macOS notifications for warnings, questions, checkpoints and completion. Set `no
 
 ## Security note
 
-Workers run unattended with write access to their worktree. Claude defaults to `permission_mode: "auto"`, where risky actions are blocked rather than prompted. Agents still run as your user on your laptop, so keep secrets out of reach of projects you point cortex at.
+Workers run unattended with write access to their worktree. Claude defaults to `permission_mode: "auto"`, where risky actions are blocked rather than prompted. Agents still run as your user on your laptop, so keep secrets out of reach of projects you point cortex at. Cursor's `--sandbox enabled` did not stop writes outside the workspace when combined with `--force` (tested), so don't rely on it.
 
 ## Development
 
 ```sh
-npm test          # end-to-end tests using fake agents (no API spend)
+npm test          # 30 tests with fake agents and fake CLIs (no API spend)
 npm run typecheck
 ```
 

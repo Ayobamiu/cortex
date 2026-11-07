@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// Fake `cursor-agent -p --output-format json`. FAKE_MODE=ok | limit.
+import { readFileSync, writeFileSync } from 'node:fs';
+readFileSync(0, 'utf8');
+if (process.env.FAKE_ARGS_FILE) writeFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify(process.argv.slice(2)));
+if (process.env.FAKE_MODE === 'limit') {
+  process.stderr.write("ActionRequiredError: Increase limits for faster responses You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Verdict:\n```json\n{"pass": false, "reason": "nope"}\n```' }) + '\n');

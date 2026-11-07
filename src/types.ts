@@ -3,6 +3,12 @@ export type TaskKind = 'code' | 'research' | 'review' | 'redteam' | 'human';
 export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'needs_human' | 'cancelled';
 export type GoalStatus = 'active' | 'blocked' | 'done' | 'budget_exhausted' | 'time_exhausted';
 export type Role = 'plan' | 'judge' | 'code' | 'research' | 'review' | 'redteam';
+/**
+ * How much checking a task's attempts get. low: command checks only (no judge spend).
+ * normal: commands, then one judge per criterion. high: two judges from different providers per
+ * criterion, plus an integrity review (no gamed tests, no fabricated data).
+ */
+export type TaskRisk = 'low' | 'normal' | 'high';
 
 /** A check. `command` = deterministic (exit 0 passes). `judge` = an LLM verdict on a criterion. */
 export interface EvalSpec {
@@ -54,6 +60,14 @@ export interface GoalConfig {
   notify?: { macos?: boolean; webhook?: string };
   /** Branch the integration branch is created from. Default: current HEAD. */
   base_branch?: string;
+  /** Paths no task may change (directories end with /). Checked on every attempt. */
+  protected_paths?: string[];
+  /**
+   * Usage anticipation, as a fraction of an agent's provider window (5-hour, weekly...).
+   * Above `soft`, work goes to fallback agents (planning/judging still allowed); at `hard`
+   * the agent rests until the window resets. Defaults 0.85 / 0.97.
+   */
+  limits?: { soft?: number; hard?: number };
 }
 
 export interface Task {
@@ -66,6 +80,7 @@ export interface Task {
   evals: EvalSpec[];
   agent: string | null;
   status: TaskStatus;
+  risk: TaskRisk;
   attempts: number;
   feedback: string | null;
   summary: string | null;
@@ -79,4 +94,12 @@ export interface EvalOutcome {
   feedback: string;
   /** A judge hit its usage limit: the verdict is unknown, so the attempt must not count. */
   rateLimited?: { agent: string; untilMs: number };
+}
+
+/** One provider usage window as reported by the agent CLI (e.g. Claude's five_hour / seven_day). */
+export interface UsageWindow {
+  window: string;
+  /** 0..1 */
+  utilization: number;
+  resetsAtMs: number;
 }
