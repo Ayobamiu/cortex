@@ -30,7 +30,7 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
   - Past `limits.soft` (default 85%), new work goes to fallback agents. Planning may still use the agent.
   - At `limits.hard` (97%), the agent rests until the window resets, before it hits the wall.
   - A limit that is hit anyway (any provider) rests the agent without counting as a failure.
-- **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours`, a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
+- **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours`, `min_free_gb` (default 5: below it no new task starts, so a full disk can't corrupt git or the state DB), a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
 
 ## Use
 

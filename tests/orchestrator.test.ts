@@ -286,3 +286,17 @@ test('a checkpoint review waiting for a resting planner does not stall ready wor
   assert.ok(cStarted < wakeAt, 'work continued while the planner rested');
   assert.ok(calls >= 3, 'the deferred review still ran once the planner woke');
 });
+
+test('below the free-disk minimum, no new task starts; work resumes once space is back', async () => {
+  const { store, orch, stateDir } = setup('disk', { planner: planner(twoTasks), w: worker('w', 'p1') }, {
+    routing: { plan: 'planner', code: 'w', judge: 'planner' }, min_free_gb: 1e9, // impossible: "disk full"
+  });
+  const done = orch.run();
+  for (let i = 0; i < 300 && !store.countEvents('disk', 'disk.low'); i++) await sleep(20);
+  await sleep(200);
+  assert.equal(store.countEvents('disk', 'attempt.started'), 0, 'nothing starts while the disk is low');
+  assert.match(readFileSync(join(stateDir, 'notify.log'), 'utf8'), /Disk nearly full/);
+  (orch as any).goal.min_free_gb = 0; // space freed
+  assert.equal(await done, 'done');
+  assert.equal(store.countEvents('disk', 'disk.ok'), 1);
+});

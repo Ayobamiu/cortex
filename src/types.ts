@@ -62,6 +62,8 @@ export interface GoalConfig {
   base_branch?: string;
   /** OS sandbox for agents and eval commands (macOS). On by default; see cortex/src/sandbox.ts. */
   sandbox?: import('./sandbox.ts').SandboxConfig;
+  /** Don't start new tasks while the disk holding the project has less free space than this (GB). Default 5. */
+  min_free_gb?: number;
   /** Paths no task may change (directories end with /). Checked on every attempt. */
   protected_paths?: string[];
   /**

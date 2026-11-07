@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statfsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Store } from './db.ts';
 import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Role, Task, TaskKind, TaskRisk, UsageWindow } from './types.ts';
@@ -55,6 +55,7 @@ export class Orchestrator {
   private reasons: Reason[] = [];
   private planFailures = 0;
   private notifiedBlocked = false;
+  private diskLow = false;
   private logSeq = 0;
 
   private maxAttempts: number;
@@ -125,7 +126,7 @@ export class Orchestrator {
       this.maybeCheckpoint(tasks);
       await this.askReadyQuestions(tasks);
 
-      const ready = tasks.filter((t) => t.status === 'pending' && t.kind !== 'human' && !this.running.has(t.id) && this.depsSatisfied(t, tasks));
+      const ready = (await this.diskOk()) ? tasks.filter((t) => t.status === 'pending' && t.kind !== 'human' && !this.running.has(t.id) && this.depsSatisfied(t, tasks)) : [];
       let resting = 0;
       for (const t of ready) {
         if (this.running.size >= this.concurrency) break;
@@ -144,8 +145,8 @@ export class Orchestrator {
         continue;
       }
 
-      // Work is ready but every agent that could do it is resting after a usage limit.
-      if (resting) {
+      // Work is ready but every agent that could do it is resting, or the disk is nearly full.
+      if (resting || this.diskLow) {
         await sleep(Math.max(1000, Math.min(this.nextWake() - Date.now(), this.pollMs * 10)));
         continue;
       }
@@ -186,6 +187,29 @@ export class Orchestrator {
       }
       await sleep(this.pollMs);
     }
+  }
+
+  /**
+   * Agents download data; a full disk corrupts git and SQLite. Below `min_free_gb`, running tasks
+   * finish but nothing new starts until space is freed. Notifies once per low-disk episode.
+   */
+  private async diskOk(): Promise<boolean> {
+    const min = this.goal.min_free_gb ?? 5;
+    let freeGb = Infinity;
+    try {
+      const s = statfsSync(this.projectDir);
+      freeGb = (s.bavail * s.bsize) / 1e9;
+    } catch {}
+    const low = freeGb < min;
+    if (low && !this.diskLow) {
+      this.store.event(this.id, 'disk.low', { free_gb: Number(freeGb.toFixed(1)), min_gb: min });
+      await this.notifier.send('warn', `Disk nearly full: ${freeGb.toFixed(1)} GB free (minimum ${min} GB). Running tasks finish; no new tasks start until space is freed.`);
+    } else if (!low && this.diskLow) {
+      this.store.event(this.id, 'disk.ok', { free_gb: Number(freeGb.toFixed(1)) });
+      await this.notifier.send('info', `Disk space recovered (${freeGb.toFixed(1)} GB free); resuming.`);
+    }
+    this.diskLow = low;
+    return !low;
   }
 
   /** A question for the human is asked only once the work it depends on (e.g. the research it cites) has passed. */
