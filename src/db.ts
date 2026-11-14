@@ -156,6 +156,38 @@ export class Store {
     return r ? toTask(r) : undefined;
   }
 
+  /**
+   * Hours the goal has spent working: time in status `active`. Time blocked on a human answer, or
+   * with no orchestrator running, doesn't count. A run that died without recording a status change
+   * is counted up to its last event.
+   */
+  activeHours(goalId: string, nowMs = Date.now()): number {
+    const rows = this.db
+      .prepare("SELECT id, ts, type, data FROM events WHERE goal_id = ? AND type IN ('goal.created', 'goal.status', 'run.started') ORDER BY id")
+      .all(goalId) as { id: number; ts: string; type: string; data: string }[];
+    const lastEventBefore = (id: number) =>
+      Date.parse((this.db.prepare('SELECT ts FROM events WHERE goal_id = ? AND id < ? ORDER BY id DESC LIMIT 1').get(goalId, id) as Row).ts as string);
+    let ms = 0;
+    let since: number | undefined;
+    for (const r of rows) {
+      const t = Date.parse(r.ts);
+      if (r.type === 'goal.created') {
+        since = t; // goals start active, with no status event
+        continue;
+      }
+      if (r.type === 'run.started') {
+        // Still "active" at a new run's start means the last run died: count it up to its last event.
+        if (since !== undefined) ms += lastEventBefore(r.id) - since;
+        since = t;
+        continue;
+      }
+      if (since !== undefined) ms += t - since;
+      since = JSON.parse(r.data).status === 'active' ? t : undefined;
+    }
+    if (since !== undefined) ms += nowMs - since;
+    return Math.max(0, ms) / 3.6e6;
+  }
+
   addCost(goalId: string, taskId: string | null, role: string, agent: string, usd: number) {
     this.db.prepare('INSERT INTO costs (goal_id, task_id, role, agent, usd, ts) VALUES (?, ?, ?, ?, ?, ?)').run(goalId, taskId, role, agent, usd, now());
   }

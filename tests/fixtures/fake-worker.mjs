@@ -27,7 +27,7 @@ if (prompt.includes('RESUMABLE')) {
     process.exit(1);
   }
 }
-if (content === 'FROM_ANSWER') content = prompt.match(/Human answer: (\S+)/)?.[1] ?? 'unknown';
+if (content === 'FROM_ANSWER') content = prompt.match(/Human answer(?: \(verbatim\))?: (\S+)/)?.[1] ?? 'unknown';
 const retrying = prompt.includes('earlier work failed');
 if (prompt.includes('FLAKY') && !retrying) content = 'wrong';
 writeFileSync(file, content + '\n');

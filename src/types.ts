@@ -2,7 +2,8 @@
 export type TaskKind = 'code' | 'research' | 'review' | 'redteam' | 'human';
 export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'needs_human' | 'cancelled';
 export type GoalStatus = 'active' | 'blocked' | 'done' | 'budget_exhausted' | 'time_exhausted';
-export type Role = 'plan' | 'judge' | 'code' | 'research' | 'review' | 'redteam';
+/** `deep` = agents for tasks the planner marks as needing deep thinking; they're tried first for those tasks. */
+export type Role = 'plan' | 'judge' | 'code' | 'research' | 'review' | 'redteam' | 'deep';
 /**
  * How much checking a task's attempts get. low: command checks only (no judge spend).
  * normal: commands, then one judge per criterion. high: two judges from different providers per
@@ -35,6 +36,7 @@ export interface Budget {
   usd_total?: number;
   usd_per_attempt?: number;
   max_attempts_per_task?: number;
+  /** Hours the run spends working. Time blocked on your answers, or with cortex stopped, doesn't count. */
   max_hours?: number;
   max_replans?: number;
   attempt_timeout_min?: number;

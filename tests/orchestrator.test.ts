@@ -300,3 +300,76 @@ test('below the free-disk minimum, no new task starts; work resumes once space i
   assert.equal(await done, 'done');
   assert.equal(store.countEvents('disk', 'disk.ok'), 1);
 });
+
+test('a task marked deep goes to the deep agent first; routine work stays with the cheaper one', async () => {
+  const tasks = [
+    { key: 'easy', title: 'easy', kind: 'code', brief: 'WRITE e.txt 1', deps: [], evals: [{ kind: 'command', run: 'test -f e.txt' }] },
+    { key: 'hard', title: 'hard', kind: 'research', deep: true, brief: 'WRITE h.txt 1', deps: [], evals: [{ kind: 'command', run: 'test -f h.txt' }] },
+  ];
+  const { orch, started } = setup('deep', { planner: planner(tasks), cheap: worker('cheap', 'p1'), strong: worker('strong', 'p2') }, {
+    routing: { plan: 'planner', code: ['cheap', 'strong'], research: ['cheap', 'strong'], deep: ['strong'], judge: 'planner' },
+  });
+  assert.equal(await orch.run(), 'done');
+  assert.deepEqual(started(), { 'easy#1': 'cheap', 'hard#1': 'strong' });
+});
+
+test('a worker building on a question sees the question as asked, not just the bare answer', async () => {
+  const prompts: string[] = [];
+  const tasks = [
+    { key: 'q', title: 'q', kind: 'human', brief: 'Pick one. A. waive rule E6. B. find more events.', deps: [], evals: [] },
+    { key: 'rec', title: 'rec', kind: 'code', brief: 'WRITE d.md 1', deps: ['q'], evals: [{ kind: 'command', run: 'test -f d.md' }] },
+  ];
+  const { store, orch } = setup('qctx', {
+    planner: planner(tasks), w: mem('w', 'p1', (req) => (prompts.push(req.prompt), doBrief(req), ok())),
+  }, { routing: { plan: 'planner', code: 'w', judge: 'planner' } });
+  const done = orch.run();
+  for (let i = 0; i < 500 && store.task('qctx', 'q')?.status !== 'needs_human'; i++) await sleep(20);
+  store.updateTask('qctx', 'q', { status: 'passed', human_answer: 'A' });
+  assert.equal(await done, 'done');
+  assert.match(prompts[0], /Question as asked:\nPick one\. A\. waive rule E6/);
+  assert.match(prompts[0], /Human answer \(verbatim\): A/);
+});
+
+test('your answer to an escalation reaches the planner and gives it a fresh replan budget', async () => {
+  const seen: string[] = [];
+  const plan = mem('planner', 'p0', (req) => {
+    seen.push(req.prompt);
+    if (req.prompt.includes("Owner's answer (verbatim): write done.txt"))
+      return ok('', { structured: { tasks: [{ key: 'fix', title: 'fix', kind: 'code', brief: 'WRITE done.txt 1', deps: [], evals: [{ kind: 'command', run: 'test -f done.txt' }] }], cancel: [], notes: 'guided' } });
+    if (req.prompt.includes('(no tasks yet)'))
+      return ok('', { structured: { tasks: [{ key: 'start', title: 'start', kind: 'code', brief: 'WRITE start.txt 1', deps: [], evals: [{ kind: 'command', run: 'test -f start.txt' }] }], cancel: [], notes: 'plan' } });
+    return ok('', { structured: { tasks: [], cancel: [], notes: 'no idea' } });
+  });
+  const { store, orch } = setup('guide', { planner: plan, w: worker('w', 'p1') }, {
+    acceptance: [{ kind: 'command', run: 'test -f done.txt' }],
+    routing: { plan: 'planner', code: 'w', judge: 'planner' }, budget: { max_replans: 1 },
+  });
+  const done = orch.run();
+  const waitBlocked = async () => {
+    for (let i = 0; i < 500 && store.goal('guide')?.status !== 'blocked'; i++) await sleep(20);
+  };
+  await waitBlocked();
+  const esc = store.tasks('guide').find((t) => t.status === 'needs_human')!;
+  assert.match(esc.brief, /Replan limit \(1\) reached/);
+  store.tx(() => {
+    store.updateTask('guide', esc.id, { status: 'passed', human_answer: 'write done.txt' });
+    store.event('guide', 'human.answer', { text: 'write done.txt' }, esc.id);
+  });
+  assert.equal(await done, 'done', 'the guided plan runs instead of re-escalating at once');
+  assert.match(seen.at(-1)!, /Question as asked:\nReplan limit/);
+  assert.equal(store.countEvents('guide', 'escalated'), 1);
+});
+
+test('the time limit counts working hours only, not time blocked on you or with cortex stopped', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cortex-hours-'));
+  const store = new Store(join(root, 'state.db'));
+  const at = (iso: string, type: string, data: object = {}) =>
+    store.db.prepare('INSERT INTO events (ts, goal_id, task_id, type, data) VALUES (?, ?, NULL, ?, ?)').run(iso, 'h', type, JSON.stringify(data));
+  at('2026-01-01T00:00:00Z', 'goal.created');
+  at('2026-01-01T02:00:00Z', 'goal.status', { status: 'blocked' }); // 2h working
+  at('2026-01-03T00:00:00Z', 'goal.status', { status: 'active' }); // 46h blocked: not counted
+  at('2026-01-03T01:00:00Z', 'attempt.started'); // 1h working, then the process died
+  at('2026-01-05T00:00:00Z', 'run.started'); // down ~47h: not counted
+  at('2026-01-05T00:00:00Z', 'goal.status', { status: 'active' });
+  assert.equal(store.activeHours('h', Date.parse('2026-01-05T03:00:00Z')), 6); // 2 + 1 + 3
+});

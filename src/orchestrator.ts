@@ -15,6 +15,8 @@ interface Reason {
   text: string;
   /** Failure-driven replans count against budget.max_replans; checkpoint reviews don't. */
   failure: boolean;
+  /** Id of the answered escalation this reason carries to the planner. */
+  guidance?: string;
 }
 
 export interface OrchestratorOptions {
@@ -98,6 +100,7 @@ export class Orchestrator {
       return 'done';
     }
     this.recover();
+    this.store.event(this.id, 'run.started');
     this.store.setGoalStatus(this.id, 'active', 'run started');
     await this.notifier.send('info', `Run started: ${head(this.goal.objective, 120)}`);
 
@@ -160,6 +163,14 @@ export class Orchestrator {
       // Nothing running and nothing launchable: decide why.
       tasks = this.store.tasks(this.id);
       const live = tasks.filter((t) => t.status !== 'cancelled');
+      // Your answer to an escalation is guidance for the planner, not a pass: plan with it first.
+      const guidance = this.unreadGuidance(tasks);
+      if (guidance.length) {
+        this.reasons.push(
+          ...guidance.map((g) => ({ text: `The owner answered escalation ${g.id}.\nQuestion as asked:\n${head(g.brief, 3000)}\n\nOwner's answer (verbatim): ${g.human_answer}`, failure: false, guidance: g.id })),
+        );
+        continue;
+      }
       if (live.every((t) => t.status === 'passed')) {
         if (await this.finalAcceptance()) return 'done';
         continue;
@@ -475,9 +486,13 @@ export class Orchestrator {
   private async plan() {
     const reasons = this.reasons.splice(0);
     const failure = reasons.some((r) => r.failure);
-    const failureReplans = this.store.events(this.id, 10000, 'plan').filter((e) => e.data.failure).length;
+    // Owner guidance on an escalation starts a fresh replan budget.
+    const plans = this.store.events(this.id, 10000, 'plan');
+    const lastGuided = plans.findLastIndex((e) => ((e.data.guidance as string[] | undefined)?.length ?? 0) > 0);
+    const failureReplans = plans.slice(lastGuided + 1).filter((e) => e.data.failure).length;
+    const guidance = reasons.flatMap((r) => (r.guidance ? [r.guidance] : []));
 
-    if (failure && failureReplans >= this.maxReplans) {
+    if (failure && !guidance.length && failureReplans >= this.maxReplans) {
       await this.escalate(`Replan limit (${this.maxReplans}) reached`, reasons);
       return;
     }
@@ -550,7 +565,9 @@ export class Orchestrator {
         const evals = (nt.evals ?? []).filter((e: EvalSpec) => (e.kind === 'command' && e.run) || (e.kind === 'judge' && e.criterion));
         const risk: TaskRisk = RISKS.includes(nt.risk as TaskRisk) ? (nt.risk as TaskRisk) : 'normal';
         this.store.insertTask({
-          id, goal_id: this.id, title: nt.title, kind, brief: nt.brief, deps, evals, agent: null, risk,
+          id, goal_id: this.id, title: nt.title, kind, brief: nt.brief, deps, evals, risk,
+          // A deep task prefers the first `deep` agent; the role's list stays as its fallbacks.
+          agent: nt.deep && kind !== 'human' ? ([this.goal.routing.deep ?? []].flat().find((n) => this.agents[n]) ?? null) : null,
           status: 'pending', // human questions are asked by askReadyQuestions once their deps pass
         });
         added.push(id);
@@ -559,7 +576,7 @@ export class Orchestrator {
       for (const t of this.store.tasks(this.id).filter((x) => x.status === 'failed')) {
         this.store.updateTask(this.id, t.id, { status: 'needs_human' });
       }
-      this.store.event(this.id, 'plan', { failure, reasons: reasons.map((r) => r.text), notes: out.notes, added, cancelled, agent: planner.name });
+      this.store.event(this.id, 'plan', { failure, reasons: reasons.map((r) => r.text), notes: out.notes, added, cancelled, agent: planner.name, guidance });
     });
 
     await this.notifier.send('info', `Plan updated: +${added.length} task(s), −${cancelled.length}`, head(out.notes ?? '', 500));
@@ -613,13 +630,20 @@ export class Orchestrator {
     return false;
   }
 
+  /** Escalations you answered after the planner last ran: their answers haven't been planned with yet. */
+  private unreadGuidance(tasks: Task[]): Task[] {
+    const escalations = new Set(this.store.events(this.id, 10000, 'escalated').map((e) => String(e.data.task)));
+    const lastPlan = this.store.events(this.id, 1, 'plan')[0]?.id ?? 0;
+    const answeredAfter = new Set(this.store.events(this.id, 10000, 'human.answer').filter((e) => e.id > lastPlan).map((e) => e.task_id));
+    return tasks.filter((t) => escalations.has(t.id) && t.status === 'passed' && t.human_answer && answeredAfter.has(t.id));
+  }
+
   private limitHit(): { status: GoalStatus; reason: string } | undefined {
     const b = this.goal.budget ?? {};
     const spent = this.store.spent(this.id);
     if (b.usd_total && spent >= b.usd_total) return { status: 'budget_exhausted', reason: `budget spent ($${spent.toFixed(2)} of $${b.usd_total})` };
-    const created = this.store.goal(this.id)?.created_at;
-    if (b.max_hours && created && (Date.now() - Date.parse(created)) / 3.6e6 >= b.max_hours) {
-      return { status: 'time_exhausted', reason: `time limit of ${b.max_hours}h reached` };
+    if (b.max_hours && this.store.activeHours(this.id) >= b.max_hours) {
+      return { status: 'time_exhausted', reason: `time limit of ${b.max_hours} working hours reached` };
     }
     return undefined;
   }

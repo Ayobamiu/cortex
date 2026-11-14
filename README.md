@@ -19,6 +19,8 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
 - **Decisions:** a failed task retries up to `max_attempts_per_task`, getting the failure as feedback. Every 2 failures it switches to the next agent in the routing list. Once out of retries, the planner re-plans. After `max_replans` it escalates to you.
 - **Autonomy:** fully unattended between checkpoints. A question for you (a `human` task) blocks **only the tasks that depend on it**; everything else keeps running. Every `checkpoint_every` passed tasks, you get a digest and the planner reviews whether the plan has drifted from the goal. Neither of these pauses the run.
 - **Invariants:** `task_checks` run on every attempt before the task's own evals. Use them for rules like "the frozen contract is unchanged", so tampering is caught immediately instead of at the end.
+- **Deep vs routine:** the planner marks a task `deep` only when it needs deep thinking (method choices, costly trade-offs, red-teaming, hard debugging). Deep tasks go to the first agent in `routing.deep`; everything else follows its role's list, so you can put a cheaper agent first there. Either way, every 2 failures move the task to the next agent.
+- **Your answers carry their question:** a task building on a question sees the question as it was asked plus your verbatim answer, so a reply like "A" is recorded with its meaning. Answering an escalation ("Guidance needed") sends your answer to the planner, which re-plans with it and gets a fresh replan budget.
 - **Review by risk:** the planner gives each task a risk level, so review is spent where mistakes are costly.
   - `low`: command checks only, no judge.
   - `normal`: one judge per criterion.
@@ -30,7 +32,7 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
   - Past `limits.soft` (default 85%), new work goes to fallback agents. Planning may still use the agent.
   - At `limits.hard` (97%), the agent rests until the window resets, before it hits the wall.
   - A limit that is hit anyway (any provider) rests the agent without counting as a failure.
-- **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours`, `min_free_gb` (default 5: below it no new task starts, so a full disk can't corrupt git or the state DB), a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
+- **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours` (working hours: time blocked on your answers or with cortex stopped doesn't count), `min_free_gb` (default 5: below it no new task starts, so a full disk can't corrupt git or the state DB), a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
 
 ## Use
 

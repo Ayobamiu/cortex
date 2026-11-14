@@ -15,7 +15,12 @@ function contextFiles(goal: GoalConfig): string {
 export function workerPrompt(goal: GoalConfig, task: Task, deps: Task[], attempt: number, maxAttempts: number, carried = false): string {
   const depCtx = deps
     .filter((d) => d.summary || d.human_answer)
-    .map((d) => `## ${d.title} (${d.id})\n${d.human_answer ? `Human answer: ${d.human_answer}\n` : ''}${head(d.summary ?? '', 3000)}`)
+    .map((d) =>
+      d.kind === 'human'
+        ? // The question as asked, so an answer like "A" can be recorded and acted on with its meaning.
+          `## ${d.title} (${d.id})\nQuestion as asked:\n${head(d.brief, 6000)}\n\nHuman answer (verbatim): ${d.human_answer ?? '(none)'}`
+        : `## ${d.title} (${d.id})\n${d.human_answer ? `Human answer: ${d.human_answer}\n` : ''}${head(d.summary ?? '', 3000)}`,
+    )
     .join('\n\n');
   return `${UNATTENDED}
 
@@ -49,6 +54,7 @@ export const PLAN_SCHEMA = {
           title: { type: 'string' },
           kind: { type: 'string', enum: ['code', 'research', 'review', 'redteam', 'human'] },
           risk: { type: 'string', enum: ['low', 'normal', 'high'], description: 'how much review attempts get' },
+          deep: { type: 'boolean', description: 'true only if the task needs deep thinking; it then goes to the strongest agent first' },
           brief: { type: 'string', description: 'self-contained instructions; for kind=human, the question for the user' },
           deps: { type: 'array', items: { type: 'string' }, description: 'keys of new tasks or ids of existing tasks' },
           evals: {
@@ -74,7 +80,7 @@ export const PLAN_SCHEMA = {
 } as const;
 
 export interface PlanOutput {
-  tasks: { key: string; title: string; kind: Task['kind']; risk?: Task['risk']; brief: string; deps: string[]; evals: EvalSpec[] }[];
+  tasks: { key: string; title: string; kind: Task['kind']; risk?: Task['risk']; deep?: boolean; brief: string; deps: string[]; evals: EvalSpec[] }[];
   cancel: string[];
   notes: string;
 }
@@ -84,7 +90,7 @@ export function planPrompt(goal: GoalConfig, tasks: Task[], reasons: string[], i
     ? tasks
         .map(
           (t) =>
-            `- [${t.status}] ${t.id} (${t.kind}, attempts ${t.attempts}) "${t.title}" deps=[${t.deps.join(', ')}]` +
+            `- [${t.status}] ${t.id} (${t.kind}${t.agent ? `, prefers ${t.agent}` : ''}, attempts ${t.attempts}) "${t.title}" deps=[${t.deps.join(', ')}]` +
             (t.status === 'failed' && t.feedback ? `\n    last failure: ${head(t.feedback, 800)}` : '') +
             (t.status === 'passed' && t.summary ? `\n    result: ${head(t.summary, 400)}` : '') +
             (t.human_answer ? `\n    human answer: ${t.human_answer}` : ''),
@@ -120,6 +126,7 @@ ${integrationLog || '(none)'}
   - "low": command checks only, no reviewer. For notes, docs, logbook entries, isolated scripts and exploratory research whose output later tasks verify anyway. Give low tasks command evals.
   - "normal" (default): command checks, then one independent reviewer per judge criterion.
   - "high": two reviewers from different providers per criterion, plus an integrity review (no gamed tests, no fabricated data). For core logic, scoring or anything the final acceptance depends on, data provenance, security, and red-team fixes.
+- Set "deep": true only when the task needs deep thinking: designing or choosing a method, weighing trade-offs where a wrong call is costly, adversarial red-teaming, hard debugging (a task that already failed for subtle reasons), or research that must reach a judgement. Leave it off for routine work: implementing an already-decided design, wiring, tests, docs, records, data collection, citation checks, edits. Routine tasks go to cheaper agents first. Most tasks are routine.
 - Use kind "human" only when progress truly requires the user's decision or credentials. Its brief is the question. Only tasks that depend on it wait; everything else continues.
 - A failed task has exhausted its retries. Cancel it and add a different approach (smaller steps, different method), or add a "human" task if it's genuinely blocked. If you cancel a task, tasks depending on it proceed without it, so cancel or replace those too if needed.
 - On a checkpoint review: check the plan still serves the goal. Cancel drifting or pointless pending tasks; add missing ones. Returning no changes is fine.
