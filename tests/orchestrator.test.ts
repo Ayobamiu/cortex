@@ -2,7 +2,7 @@
 // crash recovery and escalation. No processes are spawned except git.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -372,4 +372,27 @@ test('the time limit counts working hours only, not time blocked on you or with 
   at('2026-01-05T00:00:00Z', 'run.started'); // down ~47h: not counted
   at('2026-01-05T00:00:00Z', 'goal.status', { status: 'active' });
   assert.equal(store.activeHours('h', Date.parse('2026-01-05T03:00:00Z')), 6); // 2 + 1 + 3
+});
+
+test('guidance on a failed task resumes from its last attempt, with fresh retries', async () => {
+  const tasks = [{ key: 'g', title: 'g', kind: 'code', brief: 'two steps', deps: [], evals: [{ kind: 'command', run: 'test -f step1.txt && test -f step2.txt' }] }];
+  const w = mem('w', 'p1', (req) => {
+    // Without guidance it only ever does step 1; with guidance it finishes, but only on top of step 1.
+    if (!existsSync(join(req.cwd, 'step1.txt'))) writeFileSync(join(req.cwd, 'step1.txt'), '1\n');
+    else if (req.prompt.includes('Guidance from the user')) writeFileSync(join(req.cwd, 'step2.txt'), '2\n');
+    return ok();
+  });
+  const { store, orch, started } = setup('resume', { planner: planner(tasks), w }, {
+    routing: { plan: 'planner', code: 'w', judge: 'planner' }, budget: { max_attempts_per_task: 2, max_replans: 0 },
+  });
+  const done = orch.run();
+  for (let i = 0; i < 500 && store.task('resume', 'g')?.status !== 'needs_human'; i++) await sleep(20);
+  assert.equal(store.task('resume', 'g')?.attempts, 2);
+  store.answer('resume', 'g', 'finish step 2');
+  for (let i = 0; i < 500 && store.task('resume', 'g')?.status !== 'passed'; i++) await sleep(20);
+  assert.equal(store.task('resume', 'g')?.status, 'passed');
+  assert.deepEqual(Object.keys(started()), ['g#1', 'g#2', 'g#3'], 'attempt numbers keep counting');
+  assert.equal(store.lastTaskEvent('resume', 'g', 'attempt.carried_forward')?.data.from, 2);
+  for (const t of store.tasks('resume').filter((x) => x.status === 'needs_human')) store.updateTask('resume', t.id, { status: 'cancelled' });
+  assert.equal(await done, 'done');
 });

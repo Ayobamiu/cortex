@@ -93,11 +93,36 @@ export class Store {
     return Number(r.n);
   }
 
-  countTaskEvents(goalId: string, taskId: string, types: string[]): number {
+  countTaskEvents(goalId: string, taskId: string, types: string[], afterId = 0): number {
     const r = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM events WHERE goal_id = ? AND task_id = ? AND type IN (${types.map(() => '?').join(',')})`)
-      .get(goalId, taskId, ...types) as Row;
+      .prepare(`SELECT COUNT(*) AS n FROM events WHERE goal_id = ? AND task_id = ? AND id > ? AND type IN (${types.map(() => '?').join(',')})`)
+      .get(goalId, taskId, afterId, ...types) as Row;
     return Number(r.n);
+  }
+
+  /** Your answer to a question (it passes) or guidance for an escalated work task (it retries). */
+  answer(goalId: string, taskId: string, text: string) {
+    const t = this.task(goalId, taskId);
+    if (!t) throw new Error(`no task ${taskId} in ${goalId}`);
+    // A question can be answered before it's asked (while its research is still running).
+    const early = t.kind === 'human' && t.status === 'pending';
+    if (t.status !== 'needs_human' && t.status !== 'failed' && !early) throw new Error(`task ${taskId} is ${t.status}, not waiting on you`);
+    this.tx(() => {
+      if (t.kind === 'human') {
+        this.updateTask(goalId, taskId, { status: 'passed', human_answer: text, summary: `Human answered: ${text}` });
+        this.event(goalId, 'human.answer', { text }, taskId);
+      } else {
+        // Fresh retries with the guidance as feedback. Attempt numbers keep counting, so the next
+        // attempt carries the last one's work; retries count from here (see countedAttempts).
+        this.updateTask(goalId, taskId, { status: 'pending', human_answer: text, feedback: `Guidance from the user: ${text}\n\nPrevious failure:\n${t.feedback ?? ''}` });
+        this.event(goalId, 'human.answer', { text, attempts_before: t.attempts }, taskId);
+      }
+    });
+  }
+
+  lastTaskEvent(goalId: string, taskId: string, type: string): EventRow | undefined {
+    const r = this.db.prepare('SELECT * FROM events WHERE goal_id = ? AND task_id = ? AND type = ? ORDER BY id DESC LIMIT 1').get(goalId, taskId, type) as Row | undefined;
+    return r ? { ...(r as unknown as EventRow), data: JSON.parse(r.data as string) } : undefined;
   }
 
   upsertGoal(cfg: GoalConfig, projectDir: string) {

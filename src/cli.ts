@@ -101,20 +101,7 @@ function cmdStatus(goalId?: string) {
 
 function cmdAnswer(goalId: string, taskId: string, text: string) {
   const store = openStore(goalId);
-  const t = store.task(goalId, taskId);
-  if (!t) throw new Error(`no task ${taskId} in ${goalId}`);
-  // A question can be answered before it's asked (while its research is still running).
-  const early = t.kind === 'human' && t.status === 'pending';
-  if (t.status !== 'needs_human' && t.status !== 'failed' && !early) throw new Error(`task ${taskId} is ${t.status}, not waiting on you`);
-  store.tx(() => {
-    if (t.kind === 'human') {
-      store.updateTask(goalId, taskId, { status: 'passed', human_answer: text, summary: `Human answered: ${text}` });
-    } else {
-      // An escalated work task: fresh retries, with the guidance as feedback.
-      store.updateTask(goalId, taskId, { status: 'pending', attempts: 0, human_answer: text, feedback: `Guidance from the user: ${text}\n\nPrevious failure:\n${t.feedback ?? ''}` });
-    }
-    store.event(goalId, 'human.answer', { text }, taskId);
-  });
+  store.answer(goalId, taskId, text);
   console.log(`Recorded. A running orchestrator picks this up within its poll interval; otherwise run: cortex run ${store.goal(goalId)?.project_dir}`);
 }
 

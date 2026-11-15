@@ -249,8 +249,11 @@ export class Orchestrator {
    * toward retries or agent fallback. Capped, so a misdetected limit can't loop forever.
    */
   private countedAttempts(task: Task, attempt: number): number {
-    const free = this.store.countTaskEvents(this.id, task.id, ['attempt.rate_limited', 'attempt.interrupted', 'attempt.judge_unavailable']);
-    return Math.max(1, attempt - Math.min(free, 6));
+    // Your guidance on a failed task gives it fresh retries: count only attempts made since.
+    const answer = this.store.lastTaskEvent(this.id, task.id, 'human.answer');
+    const base = Number(answer?.data.attempts_before ?? 0);
+    const free = this.store.countTaskEvents(this.id, task.id, ['attempt.rate_limited', 'attempt.interrupted', 'attempt.judge_unavailable'], answer?.id ?? 0);
+    return Math.max(1, attempt - base - Math.min(free, 6));
   }
 
   private async runTask(task: Task) {
