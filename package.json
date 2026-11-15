@@ -1,6 +1,7 @@
 {
   "name": "cortex",
   "version": "0.1.0",
+  "private": true,
   "description": "Long-running, multi-provider agent orchestrator: goal -> task DAG -> attempts -> evals -> decisions",
   "type": "module",
   "bin": {
