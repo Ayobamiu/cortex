@@ -51,6 +51,11 @@ test('questions, problems and results reach the phone; routine info does not', a
     assert.equal(pushes[0].priority, 4);
     assert.match(pushes[0].message, /Reply here: h-source <your answer>/);
     assert.ok(pushes.every((p) => p.tags.includes('cortex')), 'our pushes are tagged so replies skip them');
+    const [accept, type, status] = pushes[0].actions;
+    assert.deepEqual([accept.action, accept.url, accept.body], ['http', 'https://ntfy.test/cortex-secret', 'h-source Go with your recommendation.'], 'a question has a one-tap answer');
+    assert.deepEqual([type.action, type.url], ['view', 'https://ntfy.test/cortex-secret']);
+    assert.equal(status.body, 'g status');
+    assert.deepEqual(pushes[1].actions, [], 'the result needs no buttons');
     const off = new Notifier('g', mkdtempSync(join(tmpdir(), 'cortex-n-')), { macos: false, phone: false }, cfg);
     await off.send('done', 'x');
     assert.equal(pushes.length, 2, 'notify.phone=false keeps a goal off the phone');
@@ -75,11 +80,17 @@ test('replies from the phone answer questions, steer, pause and report status, e
   assert.equal(s.control('g'), 'pause');
   assert.equal(pushes.length, 4, 'one confirmation per handled message; nothing for another goal or our own push');
   assert.match(pushes[3].message, /Waiting on you|passed/);
+  assert.equal(pushes[2].actions[0].label, 'Resume', 'after pausing, the button offers resume');
+  // A button tap posts its text to the topic: it is handled exactly like a typed reply.
+  reply(pushes[0].actions.find((a: any) => a.label === 'Status').body);
   await link.poll();
-  assert.equal(pushes.length, 4, 'nothing is handled twice');
+  assert.equal(pushes.length, 5);
+  assert.match(pushes[4].message, /passed/);
+  await link.poll();
+  assert.equal(pushes.length, 5, 'nothing is handled twice');
   const again = new PhoneLink(s, 'g', cfg, f);
   await again.poll();
-  assert.equal(pushes.length, 4, 'nor after a restart');
+  assert.equal(pushes.length, 5, 'nor after a restart');
   reply('g resume');
   await again.poll();
   assert.equal(s.control('g'), 'run', '"<goal> resume" targets this goal');

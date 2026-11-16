@@ -109,6 +109,8 @@ Reply in the same topic from the app while a run is live:
 | `steer <instruction>` | tells the planner |
 | `help` | this list |
 
+Pushes come with buttons, so most replies are one tap: a question has **Go with recommendation** (answers it with the recommendation the question gave), **Type a reply** (opens the topic page, where you can type) and **Status**; a problem has **Status**, **Pause** and **Type a reply**; after a pause you get **Resume**. A tap sends the same text you would type. The ntfy app only receives, so to type a reply, use the topic page (https://ntfy.sh/<your-topic>) in your phone's browser; add it to your home screen.
+
 Prefix a goal id (`my-goal pause`) when several runs are live; otherwise every live run acts on it. Each reply is handled once, and Cortex confirms it with a push. The topic name is the only key: anyone who has it can read your pushes and reply, so keep it private (`cortex phone off` and set up again to change it). Pushes go through ntfy.sh and contain task titles and questions. Set `"notify": { "phone": false }` in a goal to keep that goal off the phone.
 
 ## Cleanup

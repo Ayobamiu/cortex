@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { run } from './proc.ts';
-import { loadPhone, push, type PhoneConfig } from './phone.ts';
+import { loadPhone, push, buttonsFor, type PhoneConfig } from './phone.ts';
 
 export type Level = 'info' | 'warn' | 'needs_human' | 'done';
 
@@ -42,7 +42,10 @@ export class Notifier {
     if (this.phone && ph) {
       // On the phone you answer by replying in the topic, not with the CLI.
       const phoneBody = body.replace(/(?:→ )?cortex answer \S+ (\S+) "<[^>]+>"/g, 'Reply here: $1 <your answer>');
-      await push(this.phone, { title: `${this.goalId}: ${title}`, body: phoneBody, ...ph });
+      // One question per push gets its buttons; a list of several just links to the topic.
+      const asked = [...phoneBody.matchAll(/Reply here: (\S+) /g)].map((m) => m[1]);
+      const kind = asked.length === 1 ? 'question' : level === 'done' ? 'done' : 'problem';
+      await push(this.phone, { title: `${this.goalId}: ${title}`, body: phoneBody, ...ph, buttons: buttonsFor(this.phone, this.goalId, kind, asked[0]) });
     }
     if (this.opts.webhook) {
       try {

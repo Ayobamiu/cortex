@@ -46,12 +46,46 @@ export function savePhone(p: PhoneConfig | null) {
 
 export const newTopic = () => `cortex-${randomBytes(12).toString('hex')}`;
 
-export async function push(p: PhoneConfig, msg: { title: string; body: string; priority?: number; tags?: string[] }, f: Fetch = fetch): Promise<boolean> {
+/** A notification button (ntfy action). `send` posts that text to the topic, exactly like typing it as a reply; `open` opens a link. */
+export type Button = { label: string; send: string } | { label: string; open: string };
+
+export const topicPage = (p: PhoneConfig) => `${p.server}/${p.topic}`;
+
+/**
+ * Buttons for a push (ntfy allows 3). A question gets a one-tap answer ("go with your
+ * recommendation") and a link to type your own; problems get status and pause; replies offer
+ * the natural next step. Commands carry the goal id so they only touch that run.
+ */
+export function buttonsFor(p: PhoneConfig, goalId: string, kind: 'question' | 'problem' | 'done' | 'paused' | 'reply', taskId?: string): Button[] {
+  const type = { label: 'Type a reply', open: topicPage(p) };
+  const status = { label: 'Status', send: `${goalId} status` };
+  switch (kind) {
+    case 'question':
+      return [{ label: 'Go with recommendation', send: `${taskId} Go with your recommendation.` }, type, status];
+    case 'problem':
+      return [status, { label: 'Pause', send: `${goalId} pause` }, type];
+    case 'paused':
+      return [{ label: 'Resume', send: `${goalId} resume` }, status];
+    case 'reply':
+      return [status, type];
+    case 'done':
+      return [];
+  }
+}
+
+const toActions = (p: PhoneConfig, buttons: Button[] = []) =>
+  buttons.slice(0, 3).map((b) =>
+    'send' in b
+      ? { action: 'http', label: b.label, url: topicPage(p), method: 'POST', body: b.send, clear: true }
+      : { action: 'view', label: b.label, url: b.open, clear: false },
+  );
+
+export async function push(p: PhoneConfig, msg: { title: string; body: string; priority?: number; tags?: string[]; buttons?: Button[] }, f: Fetch = fetch): Promise<boolean> {
   try {
     const r = await f(p.server, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ topic: p.topic, title: msg.title.slice(0, 250), message: msg.body.slice(0, 3500) || msg.title, priority: msg.priority ?? 3, tags: [...(msg.tags ?? []), OUT_TAG] }),
+      body: JSON.stringify({ topic: p.topic, title: msg.title.slice(0, 250), message: msg.body.slice(0, 3500) || msg.title, priority: msg.priority ?? 3, tags: [...(msg.tags ?? []), OUT_TAG], actions: toActions(p, msg.buttons) }),
       signal: AbortSignal.timeout(10000),
     });
     return r.ok;
@@ -113,7 +147,8 @@ export class PhoneLink {
         const reply = this.handle(m.message.trim());
         if (reply === null) continue;
         this.store.event(this.goalId, 'phone.handled', { id: m.id, text: m.message.slice(0, 500) });
-        await push(this.cfg, { title: `cortex · ${this.goalId}`, body: reply, priority: 2 }, this.f);
+        const kind = this.store.control(this.goalId) === 'pause' ? 'paused' : 'reply';
+        await push(this.cfg, { title: `cortex · ${this.goalId}`, body: reply, priority: 2, buttons: buttonsFor(this.cfg, this.goalId, kind) }, this.f);
       }
     } catch {
       // Offline or ntfy down: try again next poll.
