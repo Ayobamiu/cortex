@@ -1,7 +1,8 @@
 /** `redteam` = adversarial work against what builders produced; route it to a different provider than `code`. */
 export type TaskKind = 'code' | 'research' | 'review' | 'redteam' | 'human';
 export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'needs_human' | 'cancelled';
-export type GoalStatus = 'active' | 'blocked' | 'done' | 'budget_exhausted' | 'time_exhausted';
+/** paused: no new work starts (you paused it). stopped: the run exited after its running tasks finished. */
+export type GoalStatus = 'active' | 'blocked' | 'paused' | 'stopped' | 'done' | 'budget_exhausted' | 'time_exhausted';
 /** `deep` = agents for tasks the planner marks as needing deep thinking; they're tried first for those tasks. */
 export type Role = 'plan' | 'judge' | 'code' | 'research' | 'review' | 'redteam' | 'deep';
 /**

@@ -40,8 +40,11 @@ Cortex is generic. The goal lives in **your project's folder** as `cortex.goal.j
 
 ```sh
 node bin/cortex.mjs run ~/path/to/project      # run or resume (foreground)
+node bin/cortex.mjs chat [goal]                # live thread for a run (see below)
 node bin/cortex.mjs status                     # tasks, spend, open questions
 node bin/cortex.mjs answer <goal> <task> "…"  # answer a question / unblock
+node bin/cortex.mjs steer <goal> "…"           # instruction the planner applies on its next plan
+node bin/cortex.mjs pause|resume|stop <goal>   # pause new work · go again (starts the run) · finish running work and exit
 node bin/cortex.mjs events <goal> 50           # the event log
 node bin/cortex.mjs digest <goal>              # write a digest now
 node bin/cortex.mjs service ~/path/to/project  # launchd agent: survives reboots, keeps Mac awake
@@ -51,13 +54,23 @@ node bin/cortex.mjs service ~/path/to/project  # launchd agent: survives reboots
 
 State lives in `~/.cortex/goals/<goal>/`: `state.db`, `logs/` (full transcript of every agent call), `digests/`, `notify.log`, and the worktrees. Results go to the branch `cortex/<goal>/main` in your project. Merge it whenever you like.
 
+## Chat
+
+`cortex chat [goal]` (default: the goal that changed last) is one terminal thread for a run, like a Claude Code session:
+
+- **Progress as it happens**: status, spend and working hours up front, then every meaningful event (attempts, checks, plans, questions) and each running agent's steps (`Bash: uv run pytest…`, `Edit: popindex/x.py`) streamed live from its output.
+- **Commands**: `/answer <task> <text>`, `/steer <text>`, `/pause`, `/resume` (starts the service or a background run if nothing is running), `/stop`, `/show <task>`, `/tasks [all]`, `/watch <task>`, `/live off`, `/help`.
+- **Ask anything**: plain text goes to a read-only Claude (Sonnet) that sees the run's state and can read the project and every transcript. Ask it for a change ("skip the W8 work") and it proposes one action (answer, steer, pause, resume, stop) for you to confirm with `y`. Its cost counts toward the goal budget as role `chat`.
+
+The chat only reads the state DB and writes control events, so open and close it any time; the run goes on in the background. Pause holds new work (working hours stop counting); stop lets running attempts finish, then exits so launchd won't restart it, including at login, until you resume. A steer reaches the planner once, verbatim, and resets the replan budget like an answer to an escalation does.
+
 ## Agents
 
 | adapter | how it runs | cost tracking |
 |---|---|---|
 | `claude` | `claude -p --output-format stream-json`, structured output via `--json-schema` | yes (`total_cost_usd`), plus usage-window utilization |
 | `muse` | `muse exec --json --workspace <worktree>` | no (bounded by attempts and time) |
-| `cursor` | `cursor-agent -p --output-format json --model auto`. As a read-only judge: `"extra_args": ["--mode", "ask", "--trust"]` (`--trust` skips the per-folder trust prompt). Write access needs a permission flag you add yourself | no |
+| `cursor` | `cursor-agent -p --output-format stream-json --model auto`. As a read-only judge: `"extra_args": ["--mode", "ask", "--trust"]` (`--trust` skips the per-folder trust prompt). Write access needs a permission flag you add yourself | no |
 | `command` | any shell command; prompt on stdin, answer on stdout | optional `CORTEX_COST_USD=<n>` last line |
 
 For Codex: `{ "adapter": "command", "command": "codex exec -", "provider": "openai" }`.

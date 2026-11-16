@@ -1,4 +1,6 @@
 import { spawn, execFileSync } from 'node:child_process';
+import { createWriteStream, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { Sandbox } from './sandbox.ts';
 
 /** Every descendant pid of `root`. Agents (e.g. Muse) put their tool commands in new process groups, so a group kill alone misses them. */
@@ -39,6 +41,8 @@ export interface ProcOptions {
   env?: NodeJS.ProcessEnv;
   /** Run inside this macOS sandbox, with its scrubbed environment instead of ours. */
   sandbox?: Sandbox;
+  /** Also append stdout to this file as it arrives, so a running agent can be watched live. */
+  tee?: string;
 }
 
 /** Runs a process in its own process group so a timeout kills the whole tree (agents spawn children). */
@@ -75,7 +79,18 @@ export function run(cmd: string, args: string[], opts: ProcOptions = {}): Promis
     }
     const onExit = () => killTree();
     process.once('exit', onExit);
-    child.stdout.on('data', (d) => (stdout += d));
+    let tee: ReturnType<typeof createWriteStream> | undefined;
+    if (opts.tee) {
+      try {
+        mkdirSync(dirname(opts.tee), { recursive: true });
+        tee = createWriteStream(opts.tee, { flags: 'a' });
+        tee.on('error', () => (tee = undefined));
+      } catch {}
+    }
+    child.stdout.on('data', (d) => {
+      stdout += d;
+      tee?.write(d);
+    });
     child.stderr.on('data', (d) => (stderr += d));
     child.on('error', (err) => {
       stderr += String(err);
@@ -83,6 +98,7 @@ export function run(cmd: string, args: string[], opts: ProcOptions = {}): Promis
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       process.off('exit', onExit);
+      tee?.end();
       resolve({ code, stdout, stderr, timedOut });
     });
     child.stdin.on('error', () => {});

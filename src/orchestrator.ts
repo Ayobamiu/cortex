@@ -17,6 +17,8 @@ interface Reason {
   failure: boolean;
   /** Id of the answered escalation this reason carries to the planner. */
   guidance?: string;
+  /** Id of the steer event (your mid-run instruction) this reason carries. */
+  steer?: number;
 }
 
 export interface OrchestratorOptions {
@@ -59,6 +61,9 @@ export class Orchestrator {
   private notifiedBlocked = false;
   private diskLow = false;
   private logSeq = 0;
+  private paused = false;
+  /** Steer events already handed to the planner by this process. */
+  private steersQueued = new Set<number>();
 
   private maxAttempts: number;
   private maxReplans: number;
@@ -99,6 +104,10 @@ export class Orchestrator {
       await this.notifier.send('info', 'Goal already done; nothing to do.');
       return 'done';
     }
+    if (this.store.control(this.id) === 'stop') {
+      await this.notifier.send('info', `Stopped by you. Resume with: cortex resume ${this.id}`);
+      return 'stopped';
+    }
     this.recover();
     this.store.event(this.id, 'run.started');
     this.store.setGoalStatus(this.id, 'active', 'run started');
@@ -113,6 +122,31 @@ export class Orchestrator {
         await this.checkpoint('final (limit reached)');
         return limit.status;
       }
+
+      const control = this.store.control(this.id);
+      if (control === 'stop') {
+        await this.notifier.send('info', `Stopping: waiting for ${this.running.size} running task(s) to finish.`);
+        await Promise.allSettled(this.running.values());
+        this.store.setGoalStatus(this.id, 'stopped', 'stopped by you');
+        await this.notifier.send('info', `Stopped. Resume with: cortex resume ${this.id}`);
+        return 'stopped';
+      }
+      if (control === 'pause') {
+        if (!this.paused) {
+          this.paused = true;
+          this.store.setGoalStatus(this.id, 'paused', 'paused by you');
+          await this.notifier.send('info', `Paused: nothing new starts; ${this.running.size} running task(s) finish.`);
+        }
+        await Promise.race([...this.running.values(), sleep(Math.min(this.pollMs, 5000))]);
+        continue;
+      }
+      if (this.paused) {
+        this.paused = false;
+        this.notifiedBlocked = false;
+        this.store.setGoalStatus(this.id, 'active', 'resumed');
+        await this.notifier.send('info', 'Resumed.');
+      }
+      this.queueSteers();
 
       let tasks = this.store.tasks(this.id);
       if (!tasks.length && !this.reasons.length) this.reasons.push({ text: 'Initial plan: break the goal into tasks.', failure: false });
@@ -261,7 +295,8 @@ export class Orchestrator {
     const counted = this.countedAttempts(task, attempt);
     this.store.updateTask(this.id, task.id, { status: 'running', attempts: attempt });
     const agent = this.agentFor(task.kind as Role, counted, task.agent)!;
-    this.store.event(this.id, 'attempt.started', { attempt, counted, agent: agent.name }, task.id);
+    const logFile = this.logFile(`${task.id}-${attempt}-${agent.name}`);
+    this.store.event(this.id, 'attempt.started', { attempt, counted, agent: agent.name, log: logFile }, task.id);
     let limited: { agent: string; untilMs: number } | undefined;
 
     let wt: { dir: string; branch: string; carried: boolean } | undefined;
@@ -280,7 +315,7 @@ export class Orchestrator {
         cwd: wt.dir,
         timeoutMs: this.attemptTimeoutMs,
         maxUsd: this.goal.budget?.usd_per_attempt,
-        logFile: this.logFile(`${task.id}-${attempt}-${agent.name}`),
+        logFile,
       });
       output = res.output;
       this.store.addCost(this.id, task.id, task.kind, agent.name, res.costUsd);
@@ -491,11 +526,12 @@ export class Orchestrator {
     const failure = reasons.some((r) => r.failure);
     // Owner guidance on an escalation starts a fresh replan budget.
     const plans = this.store.events(this.id, 10000, 'plan');
-    const lastGuided = plans.findLastIndex((e) => ((e.data.guidance as string[] | undefined)?.length ?? 0) > 0);
+    const lastGuided = plans.findLastIndex((e) => ((e.data.guidance as string[] | undefined)?.length ?? 0) + ((e.data.steers as number[] | undefined)?.length ?? 0) > 0);
     const failureReplans = plans.slice(lastGuided + 1).filter((e) => e.data.failure).length;
     const guidance = reasons.flatMap((r) => (r.guidance ? [r.guidance] : []));
+    const steers = reasons.flatMap((r) => (r.steer ? [r.steer] : []));
 
-    if (failure && !guidance.length && failureReplans >= this.maxReplans) {
+    if (failure && !guidance.length && !steers.length && failureReplans >= this.maxReplans) {
       await this.escalate(`Replan limit (${this.maxReplans}) reached`, reasons);
       return;
     }
@@ -511,6 +547,8 @@ export class Orchestrator {
     try {
       log = await this.ws.integrationLog();
     } catch {}
+    const planLog = this.logFile(`plan-${planner.name}`);
+    this.store.event(this.id, 'plan.started', { agent: planner.name, log: planLog, reasons: reasons.length });
     const res = await planner.run({
       sandbox: await this.sandboxFor(this.ws.integrationDir, false),
       prompt: planPrompt(this.goal, tasks, reasons.map((r) => r.text), log, this.store.spent(this.id)),
@@ -518,7 +556,7 @@ export class Orchestrator {
       timeoutMs: 20 * 60000,
       maxUsd: this.goal.budget?.usd_per_attempt,
       jsonSchema: PLAN_SCHEMA,
-      logFile: this.logFile(`plan-${planner.name}`),
+      logFile: planLog,
     });
     this.store.addCost(this.id, null, 'plan', planner.name, res.costUsd);
     if (res.rateLimited) {
@@ -579,7 +617,7 @@ export class Orchestrator {
       for (const t of this.store.tasks(this.id).filter((x) => x.status === 'failed')) {
         this.store.updateTask(this.id, t.id, { status: 'needs_human' });
       }
-      this.store.event(this.id, 'plan', { failure, reasons: reasons.map((r) => r.text), notes: out.notes, added, cancelled, agent: planner.name, guidance });
+      this.store.event(this.id, 'plan', { failure, reasons: reasons.map((r) => r.text), notes: out.notes, added, cancelled, agent: planner.name, guidance, steers });
     });
 
     await this.notifier.send('info', `Plan updated: +${added.length} task(s), −${cancelled.length}`, head(out.notes ?? '', 500));
@@ -634,6 +672,20 @@ export class Orchestrator {
   }
 
   /** Escalations you answered after the planner last ran: their answers haven't been planned with yet. */
+  /** Your mid-run instructions not yet given to the planner become planning reasons. */
+  private queueSteers() {
+    const consumed = new Set(this.store.events(this.id, 10000, 'plan').flatMap((e) => (e.data.steers as number[] | undefined) ?? []));
+    for (const e of this.store.events(this.id, 10000, 'human.steer')) {
+      if (consumed.has(e.id) || this.steersQueued.has(e.id)) continue;
+      this.steersQueued.add(e.id);
+      this.reasons.push({
+        text: `The owner sent this instruction mid-run (verbatim): ${e.data.text}\nAdjust the plan to follow it: add, cancel or change tasks as needed. If it asks for something only the owner can decide, add a 'human' question.`,
+        failure: false,
+        steer: e.id,
+      });
+    }
+  }
+
   private unreadGuidance(tasks: Task[]): Task[] {
     const escalations = new Set(this.store.events(this.id, 10000, 'escalated').map((e) => String(e.data.task)));
     const lastPlan = this.store.events(this.id, 1, 'plan')[0]?.id ?? 0;

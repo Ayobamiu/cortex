@@ -396,3 +396,56 @@ test('guidance on a failed task resumes from its last attempt, with fresh retrie
   for (const t of store.tasks('resume').filter((x) => x.status === 'needs_human')) store.updateTask('resume', t.id, { status: 'cancelled' });
   assert.equal(await done, 'done');
 });
+
+test('pause starts nothing new until resume; stop finishes running work and exits until resumed', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const slow = mem('slow', 'p1', async (req) => {
+    doBrief(req);
+    if (req.prompt.includes('a.txt')) await gate;
+    return ok();
+  });
+  const { store, orch } = setup('ctl', { planner: planner(twoTasks), slow }, { routing: { plan: 'planner', code: 'slow', judge: 'planner' } });
+  const done = orch.run();
+  while (!store.tasks('ctl').some((t) => t.status === 'running')) await sleep(10);
+  store.setControl('ctl', 'pause');
+  release();
+  while (store.task('ctl', 't1')?.status !== 'passed') await sleep(10);
+  await sleep(150);
+  assert.equal(store.goal('ctl')?.status, 'paused');
+  assert.equal(store.task('ctl', 't2')?.status, 'pending', 'nothing new starts while paused');
+  store.setControl('ctl', 'stop');
+  assert.equal(await done, 'stopped');
+  assert.equal(store.goal('ctl')?.status, 'stopped');
+  assert.equal(await orch.run(), 'stopped', 'a stopped goal stays stopped across restarts');
+  store.setControl('ctl', 'resume');
+  assert.equal(await orch.run(), 'done');
+  assert.equal(store.activeHours('ctl') < 1, true);
+});
+
+test('a mid-run instruction reaches the planner once, verbatim', async () => {
+  const seen: string[] = [];
+  const p = mem('planner', 'p0', (req) => {
+    if (req.prompt.includes('mid-run')) seen.push(req.prompt);
+    return ok('', { structured: req.prompt.includes('(no tasks yet)') ? { tasks: twoTasks, cancel: [], notes: 'plan' } : { tasks: [], cancel: [], notes: 'ok' } });
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const w = mem('w', 'p1', async (req) => {
+    doBrief(req);
+    if (req.prompt.includes('a.txt')) await gate;
+    return ok();
+  });
+  const { store, orch } = setup('steer', { planner: p, w }, { routing: { plan: 'planner', code: 'w', judge: 'planner' } });
+  const done = orch.run();
+  while (!store.tasks('steer').some((t) => t.status === 'running')) await sleep(10);
+  store.steer('steer', 'skip the docs task');
+  await sleep(100);
+  release();
+  assert.equal(await done, 'done');
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /\(verbatim\): skip the docs task/);
+  const plan = store.events('steer', 10, 'plan').at(-1)!;
+  assert.equal((plan.data.steers as number[]).length, 1);
+  assert.ok(store.events('steer', 100, 'attempt.started').every((e) => typeof e.data.log === 'string'), 'attempts say where their live log is');
+});

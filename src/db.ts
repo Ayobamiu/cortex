@@ -120,6 +120,26 @@ export class Store {
     });
   }
 
+  /** Your latest run control: pause (start nothing new), stop (finish running work, then exit), or run. */
+  control(goalId: string): 'run' | 'pause' | 'stop' {
+    const r = this.db.prepare("SELECT type FROM events WHERE goal_id = ? AND type IN ('control.pause', 'control.resume', 'control.stop') ORDER BY id DESC LIMIT 1").get(goalId) as Row | undefined;
+    return r?.type === 'control.pause' ? 'pause' : r?.type === 'control.stop' ? 'stop' : 'run';
+  }
+
+  setControl(goalId: string, what: 'pause' | 'resume' | 'stop') {
+    this.event(goalId, `control.${what}`);
+  }
+
+  /** An instruction for the planner mid-run ("skip W8", "use Cursor for docs"). The next plan takes it into account. */
+  steer(goalId: string, text: string) {
+    this.event(goalId, 'human.steer', { text });
+  }
+
+  eventsAfter(goalId: string, afterId: number, limit = 500): EventRow[] {
+    const rows = this.db.prepare('SELECT * FROM events WHERE goal_id = ? AND id > ? ORDER BY id LIMIT ?').all(goalId, afterId, limit) as Row[];
+    return rows.map((r) => ({ ...(r as unknown as EventRow), data: JSON.parse(r.data as string) }));
+  }
+
   lastTaskEvent(goalId: string, taskId: string, type: string): EventRow | undefined {
     const r = this.db.prepare('SELECT * FROM events WHERE goal_id = ? AND task_id = ? AND type = ? ORDER BY id DESC LIMIT 1').get(goalId, taskId, type) as Row | undefined;
     return r ? { ...(r as unknown as EventRow), data: JSON.parse(r.data as string) } : undefined;

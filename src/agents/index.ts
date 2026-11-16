@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AgentSpec, UsageWindow } from '../types.ts';
 import type { Sandbox } from '../sandbox.ts';
@@ -58,4 +58,13 @@ export function makeAgent(name: string, spec: AgentSpec): Agent {
 export function writeLog(file: string, parts: Record<string, string>) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, Object.entries(parts).map(([k, v]) => `===== ${k} =====\n${v}\n`).join('\n'));
+}
+
+/** Where an agent's output streams while it runs (`cortex chat` follows it). Removed once the full log is written. */
+export const liveLog = (logFile: string) => logFile.replace(/\.log$/, '') + '.live.jsonl';
+
+export function finishLive(logFile: string) {
+  try {
+    rmSync(liveLog(logFile), { force: true });
+  } catch {}
 }

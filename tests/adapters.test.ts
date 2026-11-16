@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { claudeAgent } from '../src/agents/claude.ts';
@@ -53,7 +53,17 @@ test('cursor adapter defaults to the auto model, passes extra args, and parses a
     assert.equal(r.ok, true);
     assert.deepEqual(r.structured, { pass: false, reason: 'nope' });
     const args = JSON.parse(readFileSync(argsFile, 'utf8'));
-    assert.deepEqual(args, ['-p', '--output-format', 'json', '--model', 'auto', '--mode', 'ask']);
+    assert.deepEqual(args, ['-p', '--output-format', 'stream-json', '--model', 'auto', '--mode', 'ask']);
+  });
+});
+
+test('agents stream their output to a live file while running, removed once the full log is written', async () => {
+  await withFakes('ok', async () => {
+    const { liveLog } = await import('../src/agents/index.ts');
+    const r = req('live.log');
+    await cursorAgent('cur', { adapter: 'cursor' }).run(r);
+    assert.equal(existsSync(liveLog(r.logFile)), false, 'live file is temporary');
+    assert.match(readFileSync(r.logFile, 'utf8'), /tool_call/, 'full log keeps the stream');
   });
 });
 

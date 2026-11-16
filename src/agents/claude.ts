@@ -1,6 +1,6 @@
 import type { AgentSpec, UsageWindow } from '../types.ts';
 import { run, extractJson } from '../proc.ts';
-import { writeLog, type Agent } from './index.ts';
+import { writeLog, liveLog, finishLive, type Agent } from './index.ts';
 import { detectRateLimit } from './limits.ts';
 
 /**
@@ -21,8 +21,9 @@ export function claudeAgent(name: string, spec: AgentSpec): Agent {
       if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
       args.push(...(spec.extra_args ?? []));
 
-      const p = await run('claude', args, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs, sandbox: req.sandbox });
+      const p = await run('claude', args, { cwd: req.cwd, input: req.prompt, timeoutMs: req.timeoutMs, sandbox: req.sandbox, tee: liveLog(req.logFile) });
       writeLog(req.logFile, { args: args.join(' '), prompt: req.prompt, stdout: p.stdout, stderr: p.stderr });
+      finishLive(req.logFile);
 
       const { result: res, usage, rejectedUntil } = parseStream(p.stdout);
       const costUsd = Number(res?.total_cost_usd ?? 0);

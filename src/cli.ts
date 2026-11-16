@@ -1,10 +1,13 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, unlinkSync, mkdirSync, statSync, openSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from './db.ts';
 import { Orchestrator } from './orchestrator.ts';
 import type { GoalConfig } from './types.ts';
+import { Chat, launchdLabel, launchdPlist } from './chat.ts';
+import { run } from './proc.ts';
 
 export const CORTEX_HOME = () => process.env.CORTEX_HOME ?? join(homedir(), '.cortex');
 const stateDir = (goalId: string) => join(CORTEX_HOME(), 'goals', goalId);
@@ -13,8 +16,11 @@ const openStore = (goalId: string) => new Store(join(stateDir(goalId), 'state.db
 const USAGE = `cortex — long-running multi-agent orchestrator
 
   cortex run <project-dir> [--goal <file>]   Run (or resume) the goal in <project-dir>/cortex.goal.json
+  cortex chat [goal-id]                      Live thread for a run: progress, questions, commands, ask anything
   cortex status [goal-id]                    Task table, spend, open questions
   cortex answer <goal-id> <task-id> <text>   Answer a question / unblock an escalated task
+  cortex steer <goal-id> <text>              An instruction the planner applies on its next plan
+  cortex pause|resume|stop <goal-id>         Pause new work · go again (starts the run) · finish running work and exit
   cortex events <goal-id> [n]                Last n events from the log (default 30)
   cortex digest <goal-id>                    Write a digest now and print its path
   cortex service <project-dir>               Write a launchd agent so the run survives reboots/crashes
@@ -65,7 +71,7 @@ async function cmdRun(projectArg: string, goalFile?: string) {
   store.upsertGoal(goal, projectDir);
   try {
     const status = await new Orchestrator({ store, goal, projectDir, stateDir: stateDir(goal.id) }).run();
-    console.log(`\nfinished: ${status}`);
+    console.log(`\nfinished: ${status}${status === 'stopped' ? ` (resume with: cortex resume ${goal.id})` : ''}`);
   } finally {
     release();
   }
@@ -103,6 +109,53 @@ function cmdAnswer(goalId: string, taskId: string, text: string) {
   const store = openStore(goalId);
   store.answer(goalId, taskId, text);
   console.log(`Recorded. A running orchestrator picks this up within its poll interval; otherwise run: cortex run ${store.goal(goalId)?.project_dir}`);
+}
+
+/** The goal you most likely mean: the one whose state changed last. */
+function defaultGoal(): string {
+  const dir = join(CORTEX_HOME(), 'goals');
+  const ids = existsSync(dir) ? readdirSync(dir).filter((id) => existsSync(join(dir, id, 'state.db'))) : [];
+  if (!ids.length) throw new Error('No goals yet. Start one with: cortex run <project-dir>');
+  const mtime = (id: string) => Math.max(...['state.db', 'state.db-wal'].map((f) => (existsSync(join(dir, id, f)) ? statSync(join(dir, id, f)).mtimeMs : 0)));
+  return ids.sort((a, b) => mtime(b) - mtime(a))[0];
+}
+
+/** Starts a goal's run in the background: through its launchd service if installed, else as a detached process. */
+async function startRun(goalId: string): Promise<string> {
+  const g = openStore(goalId).goal(goalId);
+  if (!g) throw new Error(`unknown goal ${goalId}`);
+  if (process.platform === 'darwin' && existsSync(launchdPlist(goalId))) {
+    const target = `gui/${process.getuid?.()}/${launchdLabel(goalId)}`;
+    const loaded = (await run('launchctl', ['print', target])).code === 0;
+    const r = loaded ? await run('launchctl', ['kickstart', target]) : await run('launchctl', ['bootstrap', `gui/${process.getuid?.()}`, launchdPlist(goalId)]);
+    if (r.code !== 0) throw new Error(`launchctl failed: ${r.stderr.trim()}`);
+    return `Started the ${launchdLabel(goalId)} service.`;
+  }
+  const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'cortex.mjs');
+  const log = openSync(join(stateDir(goalId), 'service.log'), 'a');
+  const child = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', bin, 'run', g.project_dir], { detached: true, stdio: ['ignore', log, log] });
+  child.unref();
+  return `Started the run in the background (pid ${child.pid}; log: ${join(stateDir(goalId), 'service.log')}).`;
+}
+
+async function cmdChat(goalId = defaultGoal()) {
+  const store = openStore(goalId);
+  if (!store.goal(goalId)) throw new Error(`unknown goal ${goalId}`);
+  await new Chat({ store, goalId, stateDir: stateDir(goalId), startRun: () => startRun(goalId) }).start();
+}
+
+async function cmdControl(what: 'pause' | 'resume' | 'stop', goalId: string) {
+  const store = openStore(goalId);
+  if (!store.goal(goalId)) throw new Error(`unknown goal ${goalId}`);
+  store.setControl(goalId, what);
+  if (what !== 'resume') return console.log(what === 'pause' ? 'Pausing: running tasks finish, nothing new starts.' : 'Stopping after the running tasks finish.');
+  const pidFile = join(stateDir(goalId), 'run.pid');
+  let alive = false;
+  try {
+    process.kill(Number(readFileSync(pidFile, 'utf8')), 0);
+    alive = true;
+  } catch {}
+  console.log(alive ? 'Resuming.' : await startRun(goalId));
 }
 
 function cmdEvents(goalId: string, n = 30) {
@@ -171,6 +224,18 @@ async function main(argv: string[]) {
     }
     case 'status':
       return cmdStatus(rest[0]);
+    case 'chat':
+      return cmdChat(rest[0]);
+    case 'pause':
+    case 'resume':
+    case 'stop':
+      if (!rest[0]) throw new Error(`usage: cortex ${cmd} <goal-id>`);
+      return cmdControl(cmd, rest[0]);
+    case 'steer':
+      if (rest.length < 2) throw new Error('usage: cortex steer <goal-id> <text>');
+      if (!openStore(rest[0]).goal(rest[0])) throw new Error(`unknown goal ${rest[0]}`);
+      openStore(rest[0]).steer(rest[0], rest.slice(1).join(' '));
+      return console.log('Sent to the planner; it replans with it next.');
     case 'answer':
       if (rest.length < 3) throw new Error('usage: cortex answer <goal-id> <task-id> <text>');
       return cmdAnswer(rest[0], rest[1], rest.slice(2).join(' '));
