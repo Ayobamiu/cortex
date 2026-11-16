@@ -1,6 +1,6 @@
 {
   "id": "my-project",
-  "objective": "Describe the big goal in a few sentences: what exists when this is done, and for whom.",
+  "objective": "Describe the big goal in a few sentences: what exists when this is done, and for whom. Say what's out of scope, and which decisions the agents may make themselves versus ask you about.",
   "context_files": ["SPEC.md"],
   "acceptance": [
     { "kind": "command", "run": "npm test" },
@@ -8,19 +8,22 @@
   ],
   "agents": {
     "claude": { "adapter": "claude", "model": "opus", "permission_mode": "auto" },
-    "claude-fast": { "adapter": "claude", "model": "sonnet" },
-    "muse": { "adapter": "muse" }
+    "claude-judge": { "adapter": "claude", "model": "sonnet", "permission_mode": "auto" },
+    "cursor": { "adapter": "cursor", "extra_args": ["--force", "--trust"], "provider": "cursor" },
+    "cursor-judge": { "adapter": "cursor", "extra_args": ["--mode", "ask", "--trust"], "provider": "cursor" }
   },
   "routing": {
     "plan": "claude",
-    "code": ["muse", "claude"],
-    "research": ["claude", "muse"],
-    "review": "claude",
-    "judge": ["claude-fast", "muse"]
+    "research": ["cursor", "claude"],
+    "code": ["cursor", "claude"],
+    "review": ["cursor", "claude"],
+    "redteam": ["cursor", "claude"],
+    "deep": ["claude", "cursor"],
+    "judge": ["cursor-judge", "claude-judge"]
   },
   "budget": {
     "usd_total": 40,
-    "usd_per_attempt": 3,
+    "usd_per_attempt": 5,
     "max_attempts_per_task": 3,
     "max_replans": 8,
     "max_hours": 72,
