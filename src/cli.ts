@@ -7,6 +7,7 @@ import { Store } from './db.ts';
 import { Orchestrator } from './orchestrator.ts';
 import type { GoalConfig } from './types.ts';
 import { Chat, launchdLabel, launchdPlist } from './chat.ts';
+import { newProject } from './new.ts';
 import { run } from './proc.ts';
 
 export const CORTEX_HOME = () => process.env.CORTEX_HOME ?? join(homedir(), '.cortex');
@@ -15,6 +16,7 @@ const openStore = (goalId: string) => new Store(join(stateDir(goalId), 'state.db
 
 const USAGE = `cortex — long-running multi-agent orchestrator
 
+  cortex new ["what you want"] [--in <dir>]  Describe it; Claude drafts the spec and goal, you confirm, it starts
   cortex run <project-dir> [--goal <file>]   Run (or resume) the goal in <project-dir>/cortex.goal.json
   cortex chat [goal-id]                      Live thread for a run: progress, questions, commands, ask anything
   cortex status [goal-id]                    Task table, spend, open questions
@@ -174,6 +176,16 @@ async function cmdDigest(goalId: string) {
 
 function cmdService(projectArg: string) {
   const projectDir = resolve(projectArg);
+  const { path, label, logDir } = writeService(projectDir);
+  console.log(`Wrote ${path}
+Start:   launchctl bootstrap gui/$(id -u) ${path}
+Stop:    cortex stop ${label.replace(/^com\.cortex\./, '')}
+Logs:    tail -f ${join(logDir, 'service.log')}
+It runs at lower priority than your apps (nice 10; not ProcessType=Background, which pins it to efficiency cores and made test suites 5x slower), restarts after crashes and at login, and keeps the Mac awake while running (not with the lid closed on battery).`);
+}
+
+/** The launchd agent for a project's goal: survives reboots and crashes, keeps the Mac awake. */
+function writeService(projectDir: string): { path: string; label: string; logDir: string } {
   const goal = loadGoal(projectDir);
   const label = `com.cortex.${goal.id}`;
   const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'cortex.mjs');
@@ -200,11 +212,34 @@ function cmdService(projectArg: string) {
   const path = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, plist);
-  console.log(`Wrote ${path}
-Start:   launchctl bootstrap gui/$(id -u) ${path}
-Stop:    launchctl bootout gui/$(id -u)/${label}
-Logs:    tail -f ${join(logDir, 'service.log')}
-It runs at lower priority than your apps (nice 10; not ProcessType=Background, which pins it to efficiency cores and made test suites 5x slower), restarts after crashes and at login, and keeps the Mac awake while running (not with the lid closed on battery).`);
+  return { path, label, logDir };
+}
+
+/** Describe it, confirm, and it runs: project folder, spec, goal, service, then the chat. */
+async function cmdNew(idea: string, parent: string) {
+  const dir = await newProject({
+    idea,
+    parent: resolve(parent),
+    start: async (projectDir, goal) => {
+      if (process.platform === 'darwin') {
+        const { path } = writeService(projectDir);
+        const r = await run('launchctl', ['bootstrap', `gui/${process.getuid?.()}`, path]);
+        if (r.code !== 0) throw new Error(`launchctl failed: ${r.stderr.trim()}`);
+        console.log('Started in the background (it keeps going if you close this, and after a restart).');
+      } else {
+        const bin = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'cortex.mjs');
+        mkdirSync(stateDir(goal.id), { recursive: true });
+        const log = openSync(join(stateDir(goal.id), 'service.log'), 'a');
+        spawn(process.execPath, ['--no-warnings=ExperimentalWarning', bin, 'run', projectDir], { detached: true, stdio: ['ignore', log, log] }).unref();
+        console.log('Started in the background.');
+      }
+      // The run registers the goal as it starts; then open the thread.
+      for (let i = 0; i < 60 && !(existsSync(join(stateDir(goal.id), 'state.db')) && openStore(goal.id).goal(goal.id)); i++) await new Promise((r) => setTimeout(r, 500));
+      console.log('Opening the chat. /quit leaves it; the run keeps going. Come back any time with: cortex chat\n');
+      await cmdChat(goal.id);
+    },
+  });
+  if (!dir) process.exitCode = 1;
 }
 
 async function main(argv: string[]) {
@@ -226,6 +261,10 @@ async function main(argv: string[]) {
       return cmdStatus(rest[0]);
     case 'chat':
       return cmdChat(rest[0]);
+    case 'new': {
+      const parent = flag('--in') ?? process.cwd();
+      return cmdNew(rest.join(' '), parent);
+    }
     case 'pause':
     case 'resume':
     case 'stop':

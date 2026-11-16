@@ -34,6 +34,14 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
   - A limit that is hit anyway (any provider) rests the agent without counting as a failure.
 - **Guardrails:** `usd_total`, `usd_per_attempt`, `max_hours` (working hours: time blocked on your answers or with cortex stopped doesn't count), `min_free_gb` (default 5: below it no new task starts, so a full disk can't corrupt git or the state DB), a timeout per attempt, a lock allowing one orchestrator per goal, and recovery of interrupted tasks at startup.
 
+## Start a project
+
+```sh
+cortex new "what you want, in your own words"    # or just: cortex new
+```
+
+Claude asks up to three questions if the answers would change what gets built (press Enter to let it decide), then shows what it will build, how it will be checked, and the limits. Answer `y` to start, `s` to read the full spec, or type what to change. On `y`, Cortex creates `./<name>/` (use `--in <dir>` for elsewhere) with `SPEC.md` and `cortex.goal.json`, commits them, starts the run as a background service, and opens `cortex chat`.
+
 ## Use
 
 Cortex is generic. The goal lives in **your project's folder** as `cortex.goal.json` (see `examples/goal.example.json`). The project must be a git repo with at least one commit.
