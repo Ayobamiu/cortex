@@ -1,7 +1,7 @@
 import type { AgentSpec } from '../types.ts';
 import { run, extractJson } from '../proc.ts';
 import { writeLog, liveLog, finishLive, type Agent } from './index.ts';
-import { detectRateLimit } from './limits.ts';
+import { detectRateLimit, isAuthError } from './limits.ts';
 
 /**
  * Cursor's agent CLI in print mode (`cursor-agent -p --output-format stream-json`), prompt on stdin.
@@ -36,7 +36,7 @@ export function cursorAgent(name: string, spec: AgentSpec): Agent {
       if (p.code !== 0 || res?.is_error) {
         const error = [res?.result ? String(res.result) : '', p.stderr.slice(-2000)].filter(Boolean).join(' · ') || `exit ${p.code}`;
         const until = detectRateLimit(error);
-        return { ok: false, output, costUsd: 0, error, rateLimited: until ? { untilMs: until } : undefined };
+        return { ok: false, output, costUsd: 0, error, rateLimited: until ? { untilMs: until, auth: isAuthError(error) } : undefined };
       }
       return { ok: true, output, structured: req.jsonSchema ? extractJson(output) : undefined, costUsd: 0 };
     },

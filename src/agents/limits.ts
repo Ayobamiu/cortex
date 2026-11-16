@@ -23,6 +23,9 @@ const AUTH_WAIT_MS = 3600e3;
 const floor = () => Number(process.env.CORTEX_LIMIT_FLOOR_MS ?? 60000);
 
 /** Returns when to retry (ms epoch), or undefined if the text doesn't look like a usage limit. */
+/** The agent CLI lost its login (needs `claude /login` or `cursor-agent login`). */
+export const isAuthError = (text: string) => !!text && AUTH_RE.test(text);
+
 export function detectRateLimit(text: string, now = Date.now()): number | undefined {
   if (text && ACCOUNT_RE.test(text)) return now + ACCOUNT_WAIT_MS;
   if (text && AUTH_RE.test(text)) return now + AUTH_WAIT_MS;

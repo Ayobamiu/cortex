@@ -12,6 +12,8 @@ import type { Agent, RunRequest, RunResult } from '../src/agents/index.ts';
 import type { GoalConfig, UsageWindow } from '../src/types.ts';
 import { sleep } from '../src/proc.ts';
 
+process.env.CORTEX_PHONE = 'off'; // never push to a real phone from tests
+
 type Fn = (req: RunRequest) => RunResult | Promise<RunResult>;
 const mem = (name: string, provider: string, fn: Fn): Agent => ({ name, provider, run: async (r) => fn(r) });
 const ok = (output = 'done', extra: Partial<RunResult> = {}): RunResult => ({ ok: true, output, costUsd: 0, ...extra });

@@ -5,6 +5,7 @@ import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Role, Task, TaskKin
 import { makeAgent, type Agent } from './agents/index.ts';
 import { Workspace } from './workspace.ts';
 import { Notifier } from './notify.ts';
+import { PhoneLink, loadPhone, type PhoneConfig } from './phone.ts';
 import { runEvals, type JudgeContext } from './evals.ts';
 import { INTEGRITY_CRITERION, runGuards } from './guards.ts';
 import { makeSandbox, type Sandbox } from './sandbox.ts';
@@ -29,6 +30,10 @@ export interface OrchestratorOptions {
   /** Override agents (tests). */
   agents?: Record<string, Agent>;
   pollMs?: number;
+  /** Phone link (ntfy). Default: the one set up with `cortex phone`; null = none. */
+  phone?: PhoneConfig | null;
+  /** fetch for the phone link (tests). */
+  fetch?: typeof fetch;
 }
 
 const KINDS: TaskKind[] = ['code', 'research', 'review', 'redteam', 'human'];
@@ -62,6 +67,10 @@ export class Orchestrator {
   private diskLow = false;
   private logSeq = 0;
   private paused = false;
+  private phone?: PhoneConfig;
+  private fetchImpl?: typeof fetch;
+  /** agent name -> when we last told you it lost its login. */
+  private authWarned = new Map<string, number>();
   /** Steer events already handed to the planner by this process. */
   private steersQueued = new Set<number>();
 
@@ -77,7 +86,9 @@ export class Orchestrator {
     this.projectDir = o.projectDir;
     this.pollMs = o.pollMs ?? 30000;
     this.ws = new Workspace(o.projectDir, o.goal.id, o.stateDir, o.goal.base_branch);
-    this.notifier = new Notifier(o.goal.id, o.stateDir, o.goal.notify);
+    this.phone = o.phone === null || o.goal.notify?.phone === false ? undefined : (o.phone ?? loadPhone());
+    this.fetchImpl = o.fetch;
+    this.notifier = new Notifier(o.goal.id, o.stateDir, o.goal.notify, this.phone ?? null);
     const raw = o.agents ?? Object.fromEntries(Object.entries(o.goal.agents).map(([n, s]) => [n, makeAgent(n, s)]));
     this.agents = Object.fromEntries(Object.entries(raw).map(([n, a]) => [n, this.instrument(a)]));
     this.softLimit = o.goal.limits?.soft ?? 0.85;
@@ -98,6 +109,17 @@ export class Orchestrator {
   }
 
   async run(): Promise<GoalStatus> {
+    // While the run is live, your replies in the phone topic act on it.
+    const link = this.phone ? new PhoneLink(this.store, this.id, this.phone, this.fetchImpl) : undefined;
+    const timer = link ? setInterval(() => void link.poll(), Math.max(this.pollMs, 15000)) : undefined;
+    try {
+      return await this.loop();
+    } finally {
+      if (timer) clearInterval(timer);
+    }
+  }
+
+  private async loop(): Promise<GoalStatus> {
     await this.ws.init();
     const existing = this.store.goal(this.id);
     if (existing?.status === 'done') {
@@ -123,6 +145,7 @@ export class Orchestrator {
         return limit.status;
       }
 
+      this.budgetWarning();
       const control = this.store.control(this.id);
       if (control === 'stop') {
         await this.notifier.send('info', `Stopping: waiting for ${this.running.size} running task(s) to finish.`);
@@ -430,6 +453,12 @@ export class Orchestrator {
       run: async (req) => {
         const res = await a.run(req);
         if (res.usage?.length) this.noteUsage(a.name, res.usage);
+        if (res.rateLimited?.auth && Date.now() - (this.authWarned.get(a.name) ?? 0) > 3600e3) {
+          this.authWarned.set(a.name, Date.now());
+          this.store.event(this.id, 'agent.auth_lost', { agent: a.name });
+          const fix = (this.goal.agents[a.name]?.adapter ?? '') === 'cursor' ? 'cursor-agent login' : 'claude, then /login';
+          void this.notifier.send('warn', `${a.name} lost its login`, `Its work goes to other agents meanwhile. Fix on the Mac: ${fix}`);
+        }
         return res;
       },
     };
@@ -691,6 +720,16 @@ export class Orchestrator {
     const lastPlan = this.store.events(this.id, 1, 'plan')[0]?.id ?? 0;
     const answeredAfter = new Set(this.store.events(this.id, 10000, 'human.answer').filter((e) => e.id > lastPlan).map((e) => e.task_id));
     return tasks.filter((t) => escalations.has(t.id) && t.status === 'passed' && t.human_answer && answeredAfter.has(t.id));
+  }
+
+  /** One heads-up when 80% of the budget is spent. */
+  private budgetWarning() {
+    const total = this.goal.budget?.usd_total;
+    if (!total) return;
+    const spent = this.store.spent(this.id);
+    if (spent < 0.8 * total || this.store.countEvents(this.id, 'budget.warned')) return;
+    this.store.event(this.id, 'budget.warned', { spent, total });
+    void this.notifier.send('warn', `80% of the budget spent ($${spent.toFixed(2)} of $${total})`, 'Raise budget.usd_total in cortex.goal.json to keep going past it; the run stops cleanly at the limit.');
   }
 
   private limitHit(): { status: GoalStatus; reason: string } | undefined {

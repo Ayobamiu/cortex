@@ -1,7 +1,7 @@
 import type { AgentSpec, UsageWindow } from '../types.ts';
 import { run, extractJson } from '../proc.ts';
 import { writeLog, liveLog, finishLive, type Agent } from './index.ts';
-import { detectRateLimit } from './limits.ts';
+import { detectRateLimit, isAuthError } from './limits.ts';
 
 /**
  * Claude Code in headless print mode, streaming JSON events. Prompt goes over stdin.
@@ -31,7 +31,7 @@ export function claudeAgent(name: string, spec: AgentSpec): Agent {
       if (!res || res.is_error || p.code !== 0) {
         const error = [res?.subtype, res?.result, p.stderr.slice(-2000)].filter(Boolean).join(' · ') || `exit ${p.code}`;
         const until = rejectedUntil ?? detectRateLimit(`${res?.result ?? ''} ${p.stderr} ${p.stdout.slice(-2000)}`);
-        return { ok: false, output: res?.result ?? '', costUsd, usage, error, rateLimited: until ? { untilMs: until } : undefined };
+        return { ok: false, output: res?.result ?? '', costUsd, usage, error, rateLimited: until ? { untilMs: until, auth: isAuthError(`${res?.result ?? ''} ${p.stderr} ${p.stdout.slice(-2000)}`) } : undefined };
       }
       const structured = req.jsonSchema ? (res.structured_output ?? extractJson(String(res.result ?? ''))) : undefined;
       return { ok: true, output: String(res.result ?? ''), structured, costUsd, usage };

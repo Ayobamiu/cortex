@@ -53,6 +53,8 @@ node bin/cortex.mjs status                     # tasks, spend, open questions
 node bin/cortex.mjs answer <goal> <task> "…"  # answer a question / unblock
 node bin/cortex.mjs steer <goal> "…"           # instruction the planner applies on its next plan
 node bin/cortex.mjs pause|resume|stop <goal>   # pause new work · go again (starts the run) · finish running work and exit
+node bin/cortex.mjs phone                      # questions and problems on your phone; reply there
+node bin/cortex.mjs cleanup <goal>             # remove leftover attempt branches and folders
 node bin/cortex.mjs events <goal> 50           # the event log
 node bin/cortex.mjs digest <goal>              # write a digest now
 node bin/cortex.mjs service ~/path/to/project  # launchd agent: survives reboots, keeps Mac awake
@@ -86,6 +88,37 @@ For Codex: `{ "adapter": "command", "command": "codex exec -", "provider": "open
 ## Notifications
 
 macOS notifications for warnings, questions, checkpoints and completion. Set `notify.webhook` to POST JSON events (with a `text` field, so a Slack incoming webhook works directly).
+
+### On your phone
+
+```sh
+cortex phone          # set up once: prints a private topic and sends a test push
+cortex phone test     # send another test push
+cortex phone off      # stop
+```
+
+Install the free **ntfy** app and subscribe to the topic `cortex phone` prints (server `https://ntfy.sh`). Every run on this Mac then pushes questions, problems (an agent lost its login, a task ran out of retries, 80% of the budget spent, disk nearly full), checkpoints and the result. Routine progress stays in `cortex chat`.
+
+Reply in the same topic from the app while a run is live:
+
+| you send | it does |
+|---|---|
+| `<task-id> <answer>` | answers that question (a unique start of the id is enough) |
+| `status` | spend, hours, what's running, what waits on you |
+| `pause` · `resume` · `stop` | as in the chat (a stopped run is resumed from the Mac) |
+| `steer <instruction>` | tells the planner |
+| `help` | this list |
+
+Prefix a goal id (`my-goal pause`) when several runs are live; otherwise every live run acts on it. Each reply is handled once, and Cortex confirms it with a push. The topic name is the only key: anyone who has it can read your pushes and reply, so keep it private (`cortex phone off` and set up again to change it). Pushes go through ntfy.sh and contain task titles and questions. Set `"notify": { "phone": false }` in a goal to keep that goal off the phone.
+
+## Cleanup
+
+```sh
+cortex cleanup <goal>          # shows what it would remove, then asks
+cortex cleanup <goal> --yes
+```
+
+Every attempt leaves a branch (`cortex/<goal>/t/<task>-<n>`) and sometimes a folder. Cleanup deletes the branches and folders of finished tasks (passed work is already merged into `cortex/<goal>/main`; cancelled work is no longer needed), older attempts of unfinished tasks, stray folders, and the integration folder once the goal is done. It keeps the latest attempt of every unfinished task (the next attempt continues from it), anything running, the integration branch, your own branches, tags and logs. Safe while a run is live.
 
 ## Sandbox (macOS)
 

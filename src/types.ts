@@ -60,7 +60,8 @@ export interface GoalConfig {
   concurrency?: number;
   /** Send a digest + run a drift review every N passed tasks. */
   checkpoint_every?: number;
-  notify?: { macos?: boolean; webhook?: string };
+  /** phone: push to the ntfy topic set up with `cortex phone` (default on when set up). */
+  notify?: { macos?: boolean; webhook?: string; phone?: boolean };
   /** Branch the integration branch is created from. Default: current HEAD. */
   base_branch?: string;
   /** OS sandbox for agents and eval commands (macOS). On by default; see cortex/src/sandbox.ts. */

@@ -28,7 +28,7 @@ export interface RunResult {
   costUsd: number;
   error?: string;
   /** The provider's usage window is exhausted: not the agent's fault, retry after untilMs. */
-  rateLimited?: { untilMs: number };
+  rateLimited?: { untilMs: number; /** The agent lost its login: only you can fix it. */ auth?: boolean };
   /** How full the provider's usage windows are, when the CLI reports it (Claude does). */
   usage?: UsageWindow[];
 }

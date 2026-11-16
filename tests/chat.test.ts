@@ -9,6 +9,8 @@ import { Chat, renderLive, renderEvent } from '../src/chat.ts';
 import { liveLog } from '../src/agents/index.ts';
 import type { GoalConfig } from '../src/types.ts';
 
+process.env.CORTEX_PHONE = 'off'; // never push to a real phone from tests
+
 test('live steps from Claude and Cursor streams read as one line each', () => {
   const claude = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'uv run pytest -q' } }] } };
   const cursor = { type: 'tool_call', subtype: 'started', tool_call: { editToolCall: { args: { path: '/a/b/c/d/popindex/x.py' } } } };

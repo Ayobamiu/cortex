@@ -8,21 +8,30 @@ import { Orchestrator } from './orchestrator.ts';
 import type { GoalConfig } from './types.ts';
 import { Chat, launchdLabel, launchdPlist } from './chat.ts';
 import { newProject } from './new.ts';
+import { planCleanup, applyCleanup } from './cleanup.ts';
+import { createInterface } from 'node:readline/promises';
+import { loadPhone, savePhone, newTopic, push, phoneSetupText } from './phone.ts';
 import { run } from './proc.ts';
 
 export const CORTEX_HOME = () => process.env.CORTEX_HOME ?? join(homedir(), '.cortex');
 const stateDir = (goalId: string) => join(CORTEX_HOME(), 'goals', goalId);
-const openStore = (goalId: string) => new Store(join(stateDir(goalId), 'state.db'));
+const openStore = (goalId: string) => {
+  // A goal id is a kebab-case name, never a path: anything else would create stray state folders.
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(goalId)) throw new Error(`"${goalId}" isn't a goal id (lowercase-kebab, e.g. my-project). cortex status lists them.`);
+  return new Store(join(stateDir(goalId), 'state.db'));
+};
 
 const USAGE = `cortex — long-running multi-agent orchestrator
 
   cortex new ["what you want"] [--in <dir>]  Describe it; Claude drafts the spec and goal, you confirm, it starts
   cortex run <project-dir> [--goal <file>]   Run (or resume) the goal in <project-dir>/cortex.goal.json
+  cortex phone [test|off]                    Questions and problems on your phone (ntfy); reply there to answer
   cortex chat [goal-id]                      Live thread for a run: progress, questions, commands, ask anything
   cortex status [goal-id]                    Task table, spend, open questions
   cortex answer <goal-id> <task-id> <text>   Answer a question / unblock an escalated task
   cortex steer <goal-id> <text>              An instruction the planner applies on its next plan
   cortex pause|resume|stop <goal-id>         Pause new work · go again (starts the run) · finish running work and exit
+  cortex cleanup <goal-id> [--yes]           Remove leftover attempt branches and folders (never your work)
   cortex events <goal-id> [n]                Last n events from the log (default 30)
   cortex digest <goal-id>                    Write a digest now and print its path
   cortex service <project-dir>               Write a launchd agent so the run survives reboots/crashes
@@ -81,7 +90,7 @@ async function cmdRun(projectArg: string, goalFile?: string) {
 
 function cmdStatus(goalId?: string) {
   const goalsDir = join(CORTEX_HOME(), 'goals');
-  const ids = goalId ? [goalId] : existsSync(goalsDir) ? readdirSync(goalsDir) : [];
+  const ids = goalId ? [goalId] : existsSync(goalsDir) ? readdirSync(goalsDir).filter((id) => /^[a-z0-9][a-z0-9-]*$/.test(id)) : [];
   if (!ids.length) return console.log('No goals yet.');
   for (const id of ids) {
     const store = openStore(id);
@@ -116,7 +125,7 @@ function cmdAnswer(goalId: string, taskId: string, text: string) {
 /** The goal you most likely mean: the one whose state changed last. */
 function defaultGoal(): string {
   const dir = join(CORTEX_HOME(), 'goals');
-  const ids = existsSync(dir) ? readdirSync(dir).filter((id) => existsSync(join(dir, id, 'state.db'))) : [];
+  const ids = existsSync(dir) ? readdirSync(dir).filter((id) => /^[a-z0-9][a-z0-9-]*$/.test(id) && existsSync(join(dir, id, 'state.db'))) : [];
   if (!ids.length) throw new Error('No goals yet. Start one with: cortex run <project-dir>');
   const mtime = (id: string) => Math.max(...['state.db', 'state.db-wal'].map((f) => (existsSync(join(dir, id, f)) ? statSync(join(dir, id, f)).mtimeMs : 0)));
   return ids.sort((a, b) => mtime(b) - mtime(a))[0];
@@ -144,6 +153,49 @@ async function cmdChat(goalId = defaultGoal()) {
   const store = openStore(goalId);
   if (!store.goal(goalId)) throw new Error(`unknown goal ${goalId}`);
   await new Chat({ store, goalId, stateDir: stateDir(goalId), startRun: () => startRun(goalId) }).start();
+}
+
+async function cmdPhone(arg?: string) {
+  if (arg === 'off') {
+    savePhone(null);
+    return console.log('Phone notifications off. (The topic still exists in your ntfy app; delete it there.)');
+  }
+  let p = loadPhone();
+  if (!p) {
+    if (arg === 'test') throw new Error('Not set up yet: run cortex phone');
+    p = { server: 'https://ntfy.sh', topic: newTopic() };
+    savePhone(p);
+    console.log(phoneSetupText(p));
+  } else if (arg !== 'test') console.log(phoneSetupText(p));
+  const ok = await push(p, { title: 'cortex: test', body: 'Phone notifications work. Reply "help" here while a run is live to see what you can send.', priority: 3, tags: ['white_check_mark'] });
+  console.log(ok ? '\nSent a test push.' : '\nThe test push failed: check your internet connection, then: cortex phone test');
+}
+
+async function cmdCleanup(goalId: string, yes: boolean) {
+  const store = openStore(goalId);
+  const g = store.goal(goalId);
+  if (!g) throw new Error(`unknown goal ${goalId}`);
+  let live = false;
+  try {
+    process.kill(Number(readFileSync(join(stateDir(goalId), 'run.pid'), 'utf8')), 0);
+    live = true;
+  } catch {}
+  const plan = await planCleanup(store, goalId, g.project_dir, stateDir(goalId), live);
+  const n = plan.branches.length + plan.worktrees.length + plan.strays.length + (plan.integration ? 1 : 0);
+  if (!n) return console.log('Nothing to clean up.');
+  console.log(`In ${g.project_dir}:
+  ${plan.branches.length} attempt branch(es) to delete (finished tasks' work is already merged into cortex/${goalId}/main)
+  ${plan.worktrees.length + plan.strays.length} attempt folder(s) to remove${plan.integration ? `\n  the integration folder (the goal is done; the branch cortex/${goalId}/main stays)` : ''}
+  keeping ${plan.kept.length} branch(es) that unfinished tasks continue from, the integration branch, your branches, tags and logs`);
+  if (!yes) {
+    if (!process.stdin.isTTY) return console.log('Run again with --yes to do it.');
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const a = (await rl.question('Remove them? (y/n) ')).trim();
+    rl.close();
+    if (!/^y(es)?$/i.test(a)) return console.log('Nothing removed.');
+  }
+  await applyCleanup(g.project_dir, stateDir(goalId), plan);
+  console.log('Done.');
 }
 
 async function cmdControl(what: 'pause' | 'resume' | 'stop', goalId: string) {
@@ -261,6 +313,14 @@ async function main(argv: string[]) {
       return cmdStatus(rest[0]);
     case 'chat':
       return cmdChat(rest[0]);
+    case 'phone':
+      return cmdPhone(rest[0]);
+    case 'cleanup': {
+      const yes = rest.includes('--yes');
+      const id = rest.filter((r) => r !== '--yes')[0];
+      if (!id) throw new Error('usage: cortex cleanup <goal-id> [--yes]');
+      return cmdCleanup(id, yes);
+    }
     case 'new': {
       const parent = flag('--in') ?? process.cwd();
       return cmdNew(rest.join(' '), parent);

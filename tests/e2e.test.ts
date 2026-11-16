@@ -9,6 +9,8 @@ import { Orchestrator } from '../src/orchestrator.ts';
 import type { GoalConfig } from '../src/types.ts';
 import { sleep } from '../src/proc.ts';
 
+process.env.CORTEX_PHONE = 'off'; // never push to a real phone from tests
+
 const fx = resolve(import.meta.dirname, 'fixtures');
 
 const ACCEPT: Record<string, string> = {
