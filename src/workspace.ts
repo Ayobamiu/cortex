@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { run } from './proc.ts';
 
@@ -101,6 +101,27 @@ export class Workspace {
     if (await gitOk(dir, 'diff', '--cached', '--quiet')) return false;
     await git(dir, ...AUTHOR, 'commit', '-q', '--no-verify', '-m', message);
     return true;
+  }
+
+  /**
+   * Write files on the integration branch and commit them (your mid-run spec revision). Serialized
+   * with merges. Returns the diff, or '' when nothing changed.
+   */
+  commitIntegration(files: Record<string, string>, message: string): Promise<string> {
+    const next = this.mergeLock.then(async () => {
+      for (const [f, content] of Object.entries(files)) {
+        mkdirSync(join(this.integrationDir, f, '..'), { recursive: true });
+        writeFileSync(join(this.integrationDir, f), content);
+      }
+      const paths = Object.keys(files);
+      await git(this.integrationDir, 'add', '--', ...paths);
+      if (await gitOk(this.integrationDir, 'diff', '--cached', '--quiet')) return '';
+      const diff = await git(this.integrationDir, 'diff', '--cached');
+      await git(this.integrationDir, ...AUTHOR, 'commit', '-q', '--no-verify', '-m', message);
+      return diff;
+    });
+    this.mergeLock = next.then(() => {}, () => {});
+    return next;
   }
 
   /** The worktree's private git directory (index, HEAD) inside the project's .git. */

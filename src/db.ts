@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { GoalConfig, GoalStatus, Task } from './types.ts';
+import type { GoalConfig, GoalStatus, Revision, Task } from './types.ts';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS goals (
@@ -133,6 +133,11 @@ export class Store {
   /** An instruction for the planner mid-run ("skip W8", "use Cursor for docs"). The next plan takes it into account. */
   steer(goalId: string, text: string) {
     this.event(goalId, 'human.steer', { text });
+  }
+
+  /** A change to the goal itself; the run applies it (commit + replan) on its next loop. */
+  revise(goalId: string, r: Revision) {
+    this.event(goalId, 'human.revise', r as unknown as Record<string, unknown>);
   }
 
   eventsAfter(goalId: string, afterId: number, limit = 500): EventRow[] {

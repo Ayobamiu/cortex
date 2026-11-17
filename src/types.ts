@@ -44,6 +44,18 @@ export interface Budget {
 }
 
 /** Lives in the target project as cortex.goal.json. Cortex itself is goal-agnostic. */
+/** Your change to the goal itself mid-run: the run commits it and replans against it. */
+export interface Revision {
+  /** What changes and why, in a sentence or two. */
+  summary: string;
+  /** The whole new objective, when it changes. */
+  objective?: string;
+  /** The whole new spec (the goal's first context file, usually SPEC.md), when it changes. */
+  spec_md?: string;
+  /** The whole new final acceptance, when it changes. */
+  acceptance?: EvalSpec[];
+}
+
 export interface GoalConfig {
   id: string;
   objective: string;

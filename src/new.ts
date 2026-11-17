@@ -7,13 +7,13 @@ import { run, extractJson } from './proc.ts';
 import type { EvalSpec, GoalConfig } from './types.ts';
 
 /**
- * `cortex new`: describe what you want in plain words. Claude asks a few questions if it needs
- * to, then drafts the spec and the goal. You confirm (or say what to change), and Cortex sets up
- * the project folder, commits, and starts the run. No spec writing, no git, no JSON.
+ * `cortex new`: describe what you want in plain words, then talk it through. Claude stress-tests
+ * the idea (feasibility, data, what "done" means, risks), pushes back, looks things up, and only
+ * offers a draft once the idea is sound. You confirm, and Cortex sets up the project folder,
+ * commits, and starts the run. No spec writing, no git, no JSON.
  */
 
 export interface Draft {
-  questions: string[];
   id: string;
   objective: string;
   spec_md: string;
@@ -23,10 +23,16 @@ export interface Draft {
   summary: string;
 }
 
-const DRAFT_SCHEMA = {
+/** One turn of the conversation. */
+export interface Turn {
+  reply: string;
+  ready: boolean;
+  draft?: Draft;
+}
+
+const DRAFT = {
   type: 'object',
   properties: {
-    questions: { type: 'array', items: { type: 'string' }, description: 'Up to 3 short questions whose answers would change what gets built. Empty when the draft is ready.' },
     id: { type: 'string', description: 'Short lowercase-kebab project name, e.g. "price-tracker".' },
     objective: { type: 'string', description: 'The goal in 3-6 sentences: what exists when done, for whom, and what is out of scope.' },
     spec_md: { type: 'string', description: 'SPEC.md: what to build, requirements as a checklist, what "done" means, out of scope, open questions the agents should research.' },
@@ -39,30 +45,50 @@ const DRAFT_SCHEMA = {
     max_hours: { type: 'number', description: 'Working-hours cap. Small: 24, medium: 72, large: 168.' },
     summary: { type: 'string', description: 'For the owner: 3-6 plain lines on what will be built and how it will be checked.' },
   },
-  required: ['questions', 'id', 'objective', 'spec_md', 'acceptance', 'budget_usd', 'max_hours', 'summary'],
+  required: ['id', 'objective', 'spec_md', 'acceptance', 'budget_usd', 'max_hours', 'summary'],
+};
+
+const TURN_SCHEMA = {
+  type: 'object',
+  properties: {
+    reply: { type: 'string', description: 'What you say to the owner this turn, plain and short: your pushback, the risks you see, what you checked, your questions (at most 3), or your answer to theirs.' },
+    ready: { type: 'boolean', description: 'true only when the idea is sound and settled enough to run unattended for days, and draft is complete. Never true with an unresolved blocker.' },
+    draft: { ...DRAFT, description: 'The complete project. Give it (in full) whenever ready is true; omit it while still discussing.' },
+  },
+  required: ['reply', 'ready'],
 };
 
 const BRIEF = `You set up projects for Cortex, an orchestrator that runs AI agents (Cursor for routine work, Claude for planning and hard tasks) unattended for hours or days on a goal, in a fresh git repo.
-The owner describes what they want in plain words. Turn it into a project the agents can finish without the owner:
-- If an answer would materially change what gets built, ask up to 3 short questions (once). Otherwise make sensible choices yourself and say so in the spec.
+The owner describes what they want in plain words. You are their sharp, honest technical co-founder: a weak idea run unattended for days is the most expensive failure there is, so make it sound before it starts.
+
+Talk it through with the owner, as many turns as it takes:
+- Stress-test it. Can agents do this unattended (no logins, no paid APIs or data without the owner's keys, no manual steps)? Does the data or access actually exist? Is "done" checkable? What is the biggest risk, and is there a simpler version that delivers the same value?
+- Push back plainly when something won't work or isn't worth it, and propose the better version. Agree when it's good; don't invent objections.
+- Check facts that feasibility depends on (APIs, data sources, prices, licences) with web search instead of guessing, and say what you found.
+- Ask only questions whose answers change what gets built, at most 3 per turn. For everything else make a sensible choice and say so.
+- When the owner asks you something, answer it. When they disagree, weigh it honestly: change your view if they're right, explain if not.
+- Set ready only when the objective, scope, definition of done and key risks are settled, or the owner told you to decide the rest. Then give the full draft, with what you chose for them listed in the spec. After that, if the owner wants changes, keep discussing and give the full revised draft again when settled.
+
+The draft:
 - SPEC.md is what every agent reads first: concrete requirements, a clear definition of done, out of scope.
 - Acceptance must be checkable at the end: a test command that will exist once built (the agents write the tests), plus judge criteria for what a test can't check. For research or writing projects, judge criteria alone are fine.
 - Keep scope honest: the smallest version that fully delivers what the owner asked for.`;
 
-export type Llm = (prompt: string, first: boolean) => Promise<{ draft?: Draft; error?: string }>;
+export type Llm = (prompt: string, first: boolean) => Promise<{ turn?: Turn; error?: string }>;
 
-/** Claude Opus with no tools, one session across the conversation. */
+/** Claude Opus that can search the web (nothing else), one session across the conversation. */
 export function claudeLlm(model = 'opus'): Llm {
   const session = randomUUID();
   return async (prompt, first) => {
-    const args = ['-p', '--output-format', 'json', '--model', model, '--tools', '', '--json-schema', JSON.stringify(DRAFT_SCHEMA), ...(first ? ['--session-id', session] : ['--resume', session])];
+    const web = ['WebSearch', 'WebFetch'];
+    const args = ['-p', '--output-format', 'json', '--model', model, '--tools', ...web, '--allowedTools', ...web, '--json-schema', JSON.stringify(TURN_SCHEMA), ...(first ? ['--session-id', session] : ['--resume', session])];
     const p = await run('claude', args, { input: prompt, timeoutMs: 10 * 60000 });
     let res: any;
     try {
       res = JSON.parse(p.stdout);
     } catch {}
     if (!res || res.is_error) return { error: String(res?.result ?? p.stderr ?? 'no reply').slice(0, 500) };
-    return { draft: (res.structured_output ?? extractJson(String(res.result ?? ''))) as Draft };
+    return { turn: (res.structured_output ?? extractJson(String(res.result ?? ''))) as Turn };
   };
 }
 
@@ -128,48 +154,49 @@ export async function newProject(o: NewOptions): Promise<string | null> {
     let idea = o.idea?.trim() || '';
     while (!idea) idea = await ask('What do you want to build? Describe it in your own words.\n› ');
     say('Thinking…');
-    let first = true;
     let reply = await llm(`${BRIEF}\n\nThe owner's description:\n${idea}`, true);
-    let askedQuestions = false;
+    let showReply = true;
     for (;;) {
-      if (reply.error || !reply.draft) throw new Error(`Claude couldn't draft it: ${reply.error ?? 'no draft'}`);
-      const d = reply.draft;
-      first = false;
-      if (d.questions?.length && !askedQuestions) {
-        askedQuestions = true;
-        say('\nA few questions first (answer in one message, or press Enter to let Claude decide):');
-        d.questions.forEach((q, i) => say(`  ${i + 1}. ${q}`));
-        const a = await ask('› ');
-        say('Drafting…');
-        reply = await llm(a ? `The owner's answers:\n${a}\n\nNow draft the project (questions: []).` : 'The owner says: decide these yourself. Draft the project now (questions: []).', first);
-        continue;
+      if (reply.error || !reply.turn) throw new Error(`Claude couldn't reply: ${reply.error ?? 'empty reply'}`);
+      const t = reply.turn;
+      const d = t.ready && t.draft ? t.draft : undefined;
+      if (showReply) {
+        if (t.reply?.trim()) say(`\n${t.reply.trim()}`);
+        if (d) {
+          d.id = slug(d.id);
+          const goal = goalFromDraft(d);
+          say(`\n${d.summary.trim()}\n`);
+          say(`Folder:     ${join(o.parent, d.id)}`);
+          say('Done when:');
+          for (const e of goal.acceptance) say(`  - ${e.kind === 'command' ? `\`${e.run}\` passes` : e.criterion}`);
+          say(`Limits:     $${goal.budget!.usd_total} of Claude spend, ${goal.budget!.max_hours} working hours`);
+        }
       }
-      d.id = slug(d.id);
-      const dir = join(o.parent, d.id);
-      const goal = goalFromDraft(d);
-      say(`\n${d.summary.trim()}\n`);
-      say(`Folder:     ${dir}`);
-      say('Done when:');
-      for (const e of goal.acceptance) say(`  - ${e.kind === 'command' ? `\`${e.run}\` passes` : e.criterion}`);
-      say(`Limits:     $${goal.budget!.usd_total} of Claude spend, ${goal.budget!.max_hours} working hours`);
-      const a = await ask('\nStart it? (y = start · s = show the full spec · or type what to change)\n› ');
-      if (!a) continue;
-      if (/^(y|yes|go|start)$/i.test(a)) {
-        await createProject(dir, d);
-        say(`Created ${dir} (SPEC.md and cortex.goal.json, committed).`);
-        await o.start(dir, goal);
-        return dir;
-      }
-      if (/^(s|spec|show)$/i.test(a)) {
-        say('\n' + d.spec_md.trim());
-        continue;
-      }
+      showReply = true;
+      const a = await ask(
+        d ? '\nStart it? (y = start · s = full spec · n = cancel · or keep talking)\n› ' : '\n(reply · Enter = let Claude decide the open points and draft · n = cancel)\n› ',
+      );
       if (/^(n|no|q|quit|cancel)$/i.test(a)) {
         say('Cancelled; nothing was created.');
         return null;
       }
-      say('Redrafting…');
-      reply = await llm(`The owner wants these changes:\n${a}\n\nRedraft the whole project (questions: []).`, first);
+      if (d && /^(y|yes|go|start)$/i.test(a)) {
+        const dir = join(o.parent, d.id);
+        const goal = await createProject(dir, d);
+        say(`Created ${dir} (SPEC.md and cortex.goal.json, committed).`);
+        await o.start(dir, goal);
+        return dir;
+      }
+      if (d && /^(s|spec|show)$/i.test(a)) {
+        say('\n' + d.spec_md.trim());
+        showReply = false;
+        continue;
+      }
+      say('Thinking…');
+      reply =
+        !a || /^(y|yes|go|start)$/i.test(a)
+          ? await llm('The owner wants to go ahead: settle the remaining open points yourself (list what you chose in the spec) and give the complete draft with ready: true.', false)
+          : await llm(`Owner: ${a}`, false);
     }
   } finally {
     rl.close();

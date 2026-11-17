@@ -1,7 +1,7 @@
-import { mkdirSync, statfsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Store } from './db.ts';
-import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Role, Task, TaskKind, TaskRisk, UsageWindow } from './types.ts';
+import type { EvalOutcome, EvalSpec, GoalConfig, GoalStatus, Revision, Role, Task, TaskKind, TaskRisk, UsageWindow } from './types.ts';
 import { makeAgent, type Agent } from './agents/index.ts';
 import { Workspace } from './workspace.ts';
 import { Notifier } from './notify.ts';
@@ -121,8 +121,10 @@ export class Orchestrator {
 
   private async loop(): Promise<GoalStatus> {
     await this.ws.init();
+    this.applyRevisionsToConfig();
     const existing = this.store.goal(this.id);
-    if (existing?.status === 'done') {
+    // A revision after the goal was done reopens it.
+    if (existing?.status === 'done' && !this.unplannedRevisions().length) {
       await this.notifier.send('info', 'Goal already done; nothing to do.');
       return 'done';
     }
@@ -169,7 +171,7 @@ export class Orchestrator {
         this.store.setGoalStatus(this.id, 'active', 'resumed');
         await this.notifier.send('info', 'Resumed.');
       }
-      this.queueSteers();
+      await this.queueSteers();
 
       let tasks = this.store.tasks(this.id);
       if (!tasks.length && !this.reasons.length) this.reasons.push({ text: 'Initial plan: break the goal into tasks.', failure: false });
@@ -702,8 +704,8 @@ export class Orchestrator {
 
   /** Escalations you answered after the planner last ran: their answers haven't been planned with yet. */
   /** Your mid-run instructions not yet given to the planner become planning reasons. */
-  private queueSteers() {
-    const consumed = new Set(this.store.events(this.id, 10000, 'plan').flatMap((e) => (e.data.steers as number[] | undefined) ?? []));
+  private async queueSteers() {
+    const consumed = this.plannedSteers();
     for (const e of this.store.events(this.id, 10000, 'human.steer')) {
       if (consumed.has(e.id) || this.steersQueued.has(e.id)) continue;
       this.steersQueued.add(e.id);
@@ -713,6 +715,72 @@ export class Orchestrator {
         steer: e.id,
       });
     }
+    for (const e of this.unplannedRevisions()) {
+      if (this.steersQueued.has(e.id)) continue;
+      this.steersQueued.add(e.id);
+      const r = e.data as unknown as Revision;
+      const diff = await this.applyRevision(e.id, r);
+      this.reasons.push({
+        text: [
+          `The owner revised the goal mid-run (their summary, verbatim): ${r.summary}`,
+          r.objective ? `New objective: ${r.objective}` : '',
+          r.acceptance ? `New final acceptance:\n${r.acceptance.map((a) => `- ${a.kind === 'command' ? `\`${a.run}\` passes` : a.criterion}`).join('\n')}` : '',
+          diff ? `Committed on the integration branch:\n${head(diff, 6000)}` : '',
+          'Re-plan against the revised goal: cancel tasks that no longer serve it, and add or change tasks for what is new or different (including reworking merged work the revision contradicts). Work that still fits stays.',
+        ].filter(Boolean).join('\n\n'),
+        failure: false,
+        steer: e.id,
+      });
+    }
+  }
+
+  /** Steer and revision event ids the planner has already planned with. */
+  private plannedSteers(): Set<number> {
+    return new Set(this.store.events(this.id, 10000, 'plan').flatMap((e) => (e.data.steers as number[] | undefined) ?? []));
+  }
+
+  private unplannedRevisions() {
+    const planned = this.plannedSteers();
+    return this.store.events(this.id, 10000, 'human.revise').filter((e) => !planned.has(e.id));
+  }
+
+  /** Revisions are the record: the goal file on disk may predate them, so replay them on start. */
+  private applyRevisionsToConfig() {
+    const revs = this.store.events(this.id, 10000, 'human.revise');
+    if (!revs.length) return;
+    for (const e of revs) {
+      const r = e.data as unknown as Revision;
+      if (r.objective) this.goal.objective = r.objective;
+      if (r.acceptance) this.goal.acceptance = r.acceptance;
+    }
+    this.store.upsertGoal(this.goal, this.projectDir);
+  }
+
+  /** Commits the revised spec (and goal file) on the integration branch, once. Returns the diff. */
+  private async applyRevision(id: number, r: Revision): Promise<string> {
+    this.applyRevisionsToConfig();
+    const done = this.store.events(this.id, 10000, 'spec.revised').find((e) => e.data.revision === id);
+    if (done) return String(done.data.diff ?? '');
+    const files: Record<string, string> = {};
+    if (r.spec_md?.trim()) files[this.goal.context_files?.[0] ?? 'SPEC.md'] = r.spec_md.trim() + '\n';
+    const goalFile = join(this.ws.integrationDir, 'cortex.goal.json');
+    if ((r.objective || r.acceptance) && existsSync(goalFile)) {
+      try {
+        const g = JSON.parse(readFileSync(goalFile, 'utf8'));
+        if (r.objective) g.objective = r.objective;
+        if (r.acceptance) g.acceptance = r.acceptance;
+        files['cortex.goal.json'] = JSON.stringify(g, null, 2) + '\n';
+      } catch {}
+    }
+    let diff = '';
+    try {
+      if (Object.keys(files).length) diff = await this.ws.commitIntegration(files, `cortex: owner revised the goal: ${head(r.summary, 100)}`);
+    } catch (err: any) {
+      await this.notifier.send('warn', 'Could not commit your revised spec; the planner still gets it', head(String(err?.message ?? err), 300));
+    }
+    this.store.event(this.id, 'spec.revised', { revision: id, summary: r.summary, files: Object.keys(files), diff: head(diff, 20000) });
+    await this.notifier.send('info', `Goal revised: ${head(r.summary, 120)}. Replanning.`);
+    return diff;
   }
 
   private unreadGuidance(tasks: Task[]): Task[] {

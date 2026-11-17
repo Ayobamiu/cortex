@@ -1,10 +1,10 @@
 import { createInterface, type Interface } from 'node:readline';
-import { existsSync, openSync, readSync, fstatSync, closeSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, openSync, readSync, fstatSync, closeSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Store, EventRow } from './db.ts';
-import type { Task } from './types.ts';
+import type { EvalSpec, Revision, Task } from './types.ts';
 import { liveLog } from './agents/index.ts';
 import { run, extractJson } from './proc.ts';
 
@@ -45,9 +45,9 @@ export function renderEvent(e: EventRow): string | null {
       if (d.status === 'needs_human') return `${c.magenta('?')} ${c.bold(t)} needs you — /show ${t}`;
       return null;
     case 'question.asked':
-      return `${c.magenta('?')} Question ${c.bold(t)} — /show ${t}, then /answer ${t} <answer>`;
+      return `${c.magenta('?')} Question ${c.bold(t)} — /discuss ${t} to talk it through, or /answer ${t} <answer>`;
     case 'escalated':
-      return `${c.magenta('?')} Cortex needs guidance: ${one(d.why, 120)} — /show ${d.task}`;
+      return `${c.magenta('?')} Cortex needs guidance: ${one(d.why, 120)} — /discuss ${d.task}`;
     case 'plan.started':
       return `${c.cyan('◆')} planning (${d.agent})…`;
     case 'plan':
@@ -56,6 +56,10 @@ export function renderEvent(e: EventRow): string | null {
       return `${c.red('◆')} planner failed (${d.attempt}/3): ${one(d.error, 120)}`;
     case 'human.answer':
       return `${c.green('↩')} answer recorded for ${t}: ${one(d.text, 100)}`;
+    case 'human.revise':
+      return `${c.green('✎')} goal revision sent: ${one(d.summary, 120)}`;
+    case 'spec.revised':
+      return `${c.cyan('✎')} goal revised and committed${(d.files ?? []).length ? ` (${d.files.join(', ')})` : ''}; replanning`;
     case 'human.steer':
       return `${c.green('↪')} instruction for the planner: ${one(d.text, 120)}`;
     case 'control.pause':
@@ -156,6 +160,8 @@ export interface ChatOptions {
   startRun: () => Promise<string>;
   model?: string;
   pollMs?: number;
+  /** Runs one assistant turn and returns Claude's JSON result (tests pass a fake). */
+  assistant?: (args: string[], prompt: string, cwd: string) => Promise<any>;
   /** Defaults to the terminal (tests pass streams). */
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
@@ -169,15 +175,24 @@ const ACTION_SCHEMA = {
       type: 'object',
       description: 'Only when the owner asked for a change: the one action that does it. The owner confirms before it runs.',
       properties: {
-        type: { type: 'string', enum: ['none', 'answer', 'steer', 'pause', 'resume', 'stop'] },
+        type: { type: 'string', enum: ['none', 'answer', 'steer', 'revise', 'pause', 'resume', 'stop'] },
         task: { type: 'string', description: 'answer: the task id being answered' },
-        text: { type: 'string', description: 'answer: the answer, in the owner’s words where possible. steer: the instruction for the planner.' },
+        text: { type: 'string', description: 'answer: the answer, in the owner’s words where possible. steer: the instruction for the planner. revise: one or two sentences on what changes and why.' },
+        objective: { type: 'string', description: 'revise: the whole new objective, only when it changes.' },
+        spec_md: { type: 'string', description: 'revise: the whole new spec file, only when it changes (start from the current one; change only what was agreed).' },
+        acceptance: {
+          type: 'array',
+          description: 'revise: the whole new final acceptance, only when it changes.',
+          items: { type: 'object', properties: { kind: { type: 'string', enum: ['command', 'judge'] }, run: { type: 'string' }, criterion: { type: 'string' } }, required: ['kind'] },
+        },
       },
       required: ['type'],
     },
   },
   required: ['reply'],
 };
+
+type Action = { type: string; task?: string; text?: string; objective?: string; spec_md?: string; acceptance?: EvalSpec[] };
 
 export class Chat {
   private store: Store;
@@ -189,7 +204,7 @@ export class Chat {
   private tails = new Map<string, { tail: Tail; label: string }>();
   private live = true;
   private watch: string | null = null;
-  private pending: { type: string; task?: string; text?: string } | null = null;
+  private pending: Action | null = null;
   private session = randomUUID();
   private asked = 0;
   private busy = false;
@@ -347,12 +362,14 @@ export class Chat {
             '/tasks [all]            open tasks (all: every task)',
             '/show <task>            a task’s brief, last result and feedback',
             '/answer <task> <text>   answer a question or guide a stuck task',
+            '/discuss <task>         talk a question through: options, tradeoffs, a recommendation',
             '/steer <text>           an instruction for the planner ("skip W8", "use Cursor for docs")',
             '/pause  /resume  /stop  pause new work · go again (starts the run if needed) · finish running work and exit',
             '/live on|off            show agents’ steps as they work',
             '/watch <task>|all       follow one task’s steps only',
             '/quit                   leave the chat (the run keeps going)',
-            'Anything else is a question about the run. If you ask for a change, Claude proposes it and you confirm.',
+            'Anything else goes to Claude: ask about the run, or talk through a change, even to the goal itself.',
+            'When you agree on a change, Claude proposes it (a goal change shows the spec diff) and you confirm with y.',
           ].join('\n'),
         );
       case 'status':
@@ -387,6 +404,13 @@ export class Chat {
         if (!text) throw new Error('usage: /answer <task> <text>');
         return this.act({ type: 'answer', task: t.id, text });
       }
+      case 'discuss': {
+        const t = this.task(args[0]);
+        const more = rest.slice(args[0].length).trim();
+        return this.ask(
+          `Help me decide on ${t.id}. In plain words: what is being asked and why it came up, the realistic options and what each would mean for the run (work, cost, risk), and your recommendation. Read the transcript of the attempt that raised it if that helps. Don't propose an answer action yet; I'll tell you what I pick.${more ? `\n\nMy thoughts: ${more}` : ''}`,
+        );
+      }
       case 'steer':
         if (!rest) throw new Error('usage: /steer <instruction>');
         return this.act({ type: 'steer', text: rest });
@@ -417,8 +441,15 @@ export class Chat {
     return t;
   }
 
-  private async act(a: { type: string; task?: string; text?: string }) {
+  private async act(a: Action) {
     switch (a.type) {
+      case 'revise': {
+        const r: Revision = { summary: a.text ?? 'Goal revised', ...(a.objective ? { objective: a.objective } : {}), ...(a.spec_md ? { spec_md: a.spec_md } : {}), ...(a.acceptance?.length ? { acceptance: a.acceptance } : {}) };
+        this.store.revise(this.goalId, r);
+        const g = this.store.goal(this.goalId)!;
+        if (this.processAlive()) return this.out(c.green('Sent. The run commits it and replans against it next.'));
+        return this.out(c.green('Saved. ') + c.yellow(g.status === 'done' ? 'The goal was done; /resume reopens it with the change.' : 'The run isn’t live; /resume applies it.'));
+      }
       case 'answer':
         this.store.answer(this.goalId, a.task!, a.text!);
         return this.out(c.green(`Answered ${a.task}.`) + (this.processAlive() ? '' : c.yellow(' The orchestrator isn’t running: /resume starts it.')));
@@ -437,6 +468,33 @@ export class Chat {
         return this.out(c.green(await this.opts.startRun()));
       }
     }
+  }
+
+  /** The current spec: the integration branch's copy (what agents read), else the project's. */
+  private specPath(g: { project_dir: string; config: { context_files?: string[] } }): string {
+    const f = g.config.context_files?.[0] ?? 'SPEC.md';
+    const integ = join(this.stateDir, 'integration', f);
+    return existsSync(integ) ? integ : join(g.project_dir, f);
+  }
+
+  /** What a proposed revision changes: objective, acceptance, and the spec as a diff. */
+  private async revisionPreview(a: Action, g: { project_dir: string; config: { objective: string; context_files?: string[] } }): Promise<string> {
+    const parts: string[] = [];
+    if (a.objective) parts.push(`${c.bold('Objective')}\n${c.red('- ' + one(g.config.objective, 400))}\n${c.green('+ ' + one(a.objective, 400))}`);
+    if (a.acceptance?.length) parts.push(`${c.bold('Final acceptance')}\n${a.acceptance.map((e) => `  - ${e.kind === 'command' ? `\`${e.run}\` passes` : e.criterion}`).join('\n')}`);
+    if (a.spec_md) {
+      const cur = this.specPath(g);
+      const tmp = mkdtempSync(join(tmpdir(), 'cortex-rev-'));
+      const old = join(tmp, 'current');
+      const next = join(tmp, 'revised');
+      writeFileSync(old, existsSync(cur) ? readFileSync(cur, 'utf8') : '');
+      writeFileSync(next, a.spec_md.trim() + '\n');
+      const d = await run('git', ['diff', '--no-index', '--no-color', '-U1', old, next]);
+      const lines = d.stdout.split('\n').slice(4).filter((l) => l && !l.startsWith('\\'));
+      const shown = lines.slice(0, 60).map((l) => (l.startsWith('+') ? c.green(l) : l.startsWith('-') ? c.red(l) : l.startsWith('@@') ? c.cyan(l) : c.dim(l)));
+      parts.push(`${c.bold('Spec')}\n${lines.length ? shown.join('\n') : c.dim('(no change)')}${lines.length > 60 ? c.dim(`\n… ${lines.length - 60} more lines`) : ''}`);
+    }
+    return parts.join('\n\n');
   }
 
   /** A read-only Claude that knows the run's state and can read its project and logs. */
@@ -458,7 +516,11 @@ export class Chat {
         .filter((t) => t.status !== 'cancelled')
         .map((t) => `${t.status} ${t.id} (${t.kind}, a=${t.attempts}): ${one(t.title, 90)}`)
         .join('\n');
-      const state = `Status now:\n${strip(this.summary())}\n\nTasks (cancelled hidden):\n${tasks}\n\nRecent events:\n${strip(recent)}`;
+      const waiting = this.questions()
+        .map((t) => `[${t.id}] ${t.title}\n${one(t.brief, 1500)}`)
+        .join('\n\n');
+      const acceptance = (g.config.acceptance ?? []).map((a) => `- ${a.kind === 'command' ? `\`${a.run}\` passes` : a.criterion}`).join('\n');
+      const state = `Status now:\n${strip(this.summary())}\n\nCurrent objective: ${g.config.objective}\nCurrent final acceptance:\n${acceptance || '(none)'}\n\nTasks (cancelled hidden):\n${tasks}${waiting ? `\n\nWaiting on the owner:\n${waiting}` : ''}\n\nRecent events:\n${strip(recent)}`;
       const prompt =
         this.asked === 0
           ? `You are the run assistant inside \`cortex chat\`, talking to the owner of a long-running multi-agent run.
@@ -469,8 +531,11 @@ Answer plainly and briefly (a few lines; the owner reads this in a terminal). Ci
 If the owner asks for a change, propose exactly one action and they will confirm it:
 - answer: answer a task waiting on them (task id + text, in their words);
 - steer: an instruction the planner applies on its next plan (e.g. "cancel W8 tasks", "route docs to cursor");
+- revise: a change to the goal itself (objective, spec, final acceptance). The run commits it on its branch and replans against it. Give the whole new text of each part that changes, starting from the current version (the current spec is ${this.specPath(g)}; read it first), and only what was agreed;
 - pause / resume / stop.
 Otherwise action.type is "none".
+
+Talk things through before acting. When the owner is unsure, or a question is waiting on them, explain the options, their tradeoffs and what each means for the run, and recommend one. For a change to the goal itself, first say plainly what it costs (merged work that gets redone, budget, risk) and push back if it's a bad idea; propose the revise action only once you both agree on what changes. Never propose an action the owner hasn't agreed to.
 
 ${state}
 
@@ -478,27 +543,35 @@ Owner: ${question}`
           : `${state}\n\nOwner: ${question}`;
       const args = ['-p', '--output-format', 'json', '--model', this.opts.model ?? 'sonnet', '--tools', 'Read', 'Grep', 'Glob', '--add-dir', this.stateDir, '--json-schema', JSON.stringify(ACTION_SCHEMA)];
       args.push(...(this.asked === 0 ? ['--session-id', this.session] : ['--resume', this.session]));
-      const p = await run('claude', args, { cwd: g.project_dir, input: prompt, timeoutMs: 5 * 60000 });
-      let res: any;
-      try {
-        res = JSON.parse(p.stdout);
-      } catch {}
-      if (!res || res.is_error) throw new Error(`assistant failed: ${one(res?.result ?? p.stderr ?? p.stdout, 300)}`);
+      const res = await (this.opts.assistant ?? claudeTurn)(args, prompt, g.project_dir);
       this.asked++;
       const usd = Number(res.total_cost_usd ?? 0);
       if (usd) this.store.addCost(this.goalId, null, 'chat', 'chat', usd);
-      const out = (res.structured_output ?? extractJson(String(res.result ?? ''))) as { reply?: string; action?: { type: string; task?: string; text?: string } } | undefined;
+      const out = (res.structured_output ?? extractJson(String(res.result ?? ''))) as { reply?: string; action?: Action } | undefined;
       this.out(out?.reply ?? String(res.result ?? ''));
       const a = out?.action;
       if (a && a.type !== 'none') {
+        if (a.type === 'revise' && !a.objective && !a.spec_md && !a.acceptance?.length) return this.out(c.dim('(Claude proposed a revision with no changes; ignored.)'));
         this.pending = a;
-        const what = a.type === 'answer' ? `answer ${a.task}: “${a.text}”` : a.type === 'steer' ? `tell the planner: “${a.text}”` : a.type;
+        if (a.type === 'revise') this.out(await this.revisionPreview(a, g));
+        const what =
+          a.type === 'answer' ? `answer ${a.task}: “${a.text}”` : a.type === 'steer' ? `tell the planner: “${a.text}”` : a.type === 'revise' ? `revise the goal: “${a.text}”` : a.type;
         this.out(c.bold(`Do it? ${what} (y/n)`));
       }
     } finally {
       this.busy = false;
     }
   }
+}
+
+async function claudeTurn(args: string[], prompt: string, cwd: string): Promise<any> {
+  const p = await run('claude', args, { cwd, input: prompt, timeoutMs: 5 * 60000 });
+  let res: any;
+  try {
+    res = JSON.parse(p.stdout);
+  } catch {}
+  if (!res || res.is_error) throw new Error(`assistant failed: ${one(res?.result ?? p.stderr ?? p.stdout, 300)}`);
+  return res;
 }
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');

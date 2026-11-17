@@ -40,7 +40,9 @@ Goal ──► Plan (task DAG) ──► Task ──► Attempt ──► Eval �
 cortex new "what you want, in your own words"    # or just: cortex new
 ```
 
-Claude asks up to three questions if the answers would change what gets built (press Enter to let it decide), then shows what it will build, how it will be checked, and the limits. Answer `y` to start, `s` to read the full spec, or type what to change. On `y`, Cortex creates `./<name>/` (use `--in <dir>` for elsewhere) with `SPEC.md` and `cortex.goal.json`, commits them, starts the run as a background service, and opens `cortex chat`.
+Then talk it through, as many turns as it takes. Claude (Opus, with web search) stress-tests the idea: can agents do it unattended, does the data or access exist, is "done" checkable, what's the biggest risk, is there a simpler version. It pushes back when something won't work, checks facts instead of guessing, asks only questions that change what gets built, and answers yours. Press Enter (or `y`) any time to let it settle the open points itself.
+
+Once the idea is sound it shows what it will build, how it will be checked, and the limits. Answer `y` to start, `s` to read the full spec, `n` to cancel, or keep talking (it redrafts when you agree on a change). On `y`, Cortex creates `./<name>/` (use `--in <dir>` for elsewhere) with `SPEC.md` and `cortex.goal.json`, commits them, starts the run as a background service, and opens `cortex chat`.
 
 ## Use
 
@@ -51,7 +53,7 @@ node bin/cortex.mjs run ~/path/to/project      # run or resume (foreground)
 node bin/cortex.mjs chat [goal]                # live thread for a run (see below)
 node bin/cortex.mjs status                     # tasks, spend, open questions
 node bin/cortex.mjs answer <goal> <task> "…"  # answer a question / unblock
-node bin/cortex.mjs steer <goal> "…"           # instruction the planner applies on its next plan
+node bin/cortex.mjs steer <goal> "…"           # instruction the planner applies on its next plan (goal changes: in the chat)
 node bin/cortex.mjs pause|resume|stop <goal>   # pause new work · go again (starts the run) · finish running work and exit
 node bin/cortex.mjs phone                      # questions and problems on your phone; reply there
 node bin/cortex.mjs cleanup <goal>             # remove leftover attempt branches and folders
@@ -70,7 +72,9 @@ State lives in `~/.cortex/goals/<goal>/`: `state.db`, `logs/` (full transcript o
 
 - **Progress as it happens**: status, spend and working hours up front, then every meaningful event (attempts, checks, plans, questions) and each running agent's steps (`Bash: uv run pytest…`, `Edit: popindex/x.py`) streamed live from its output.
 - **Commands**: `/answer <task> <text>`, `/steer <text>`, `/pause`, `/resume` (starts the service or a background run if nothing is running), `/stop`, `/show <task>`, `/tasks [all]`, `/watch <task>`, `/live off`, `/help`.
-- **Ask anything**: plain text goes to a read-only Claude (Sonnet) that sees the run's state and can read the project and every transcript. Ask it for a change ("skip the W8 work") and it proposes one action (answer, steer, pause, resume, stop) for you to confirm with `y`. Its cost counts toward the goal budget as role `chat`.
+- **Ask anything, talk it through**: plain text goes to a read-only Claude (Sonnet) that sees the run's state, the questions waiting on you, and can read the project and every transcript. It explains options and tradeoffs, recommends, and pushes back. When you agree on a change it proposes one action (answer, steer, revise, pause, resume, stop) for you to confirm with `y`. Its cost counts toward the goal budget as role `chat`.
+- **Questions**: `/discuss <task>` explains a waiting question in plain words (what's asked and why, the options and what each means for the run, a recommendation). Talk until you decide, then answer.
+- **Change the goal itself**: say what you want different ("make it daily, not weekly"). Claude first says what it costs (merged work redone, budget, risk), then proposes a revision: the new objective, spec and/or final acceptance, shown as a diff. On `y` the run commits the new spec on its branch, switches to the new acceptance, and replans against it (cancelling what no longer fits, adding what's new). A revision to a finished goal reopens it on `/resume`.
 
 The chat only reads the state DB and writes control events, so open and close it any time; the run goes on in the background. Pause holds new work (working hours stop counting); stop lets running attempts finish, then exits so launchd won't restart it, including at login, until you resume. A steer reaches the planner once, verbatim, and resets the replan budget like an answer to an escalation does.
 

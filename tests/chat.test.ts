@@ -64,3 +64,48 @@ test('chat shows the run, follows a running agent, and answers, steers and pause
   assert.equal(started, 1, 'resume starts the run when no orchestrator is alive');
   assert.match(text, /answer recorded for q1/, 'new events stream into the thread');
 });
+
+test('chat: talk a question through, then agree a goal change; it shows the spec diff and sends it on y', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cortex-chat-'));
+  const store = new Store(join(dir, 'state.db'));
+  store.upsertGoal({ id: 'g', objective: 'Index songs', acceptance: [{ kind: 'command', run: 'npm test' }], context_files: ['SPEC.md'], agents: {}, routing: {} } as unknown as GoalConfig, dir);
+  store.insertTask({ id: 'q1', goal_id: 'g', title: 'Pick a source', kind: 'human', brief: 'Spotify API or scraping charts?', deps: [], evals: [], agent: null, status: 'needs_human' });
+  writeFileSync(join(dir, 'SPEC.md'), '# Songs\n- weekly index\n');
+  const prompts: string[] = [];
+  const turns = [
+    { reply: 'Spotify needs your keys; charts are free but coarse. I recommend charts.', action: { type: 'none' } },
+    { reply: 'Daily means 7x the runs; doable.', action: { type: 'none' } },
+    { reply: 'Agreed: daily.', action: { type: 'revise', text: 'Daily instead of weekly', spec_md: '# Songs\n- daily index\n', acceptance: [{ kind: 'judge', criterion: 'Updates daily' }] } },
+  ];
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let text = '';
+  output.on('data', (d) => (text += d));
+  const chat = new Chat({
+    store, goalId: 'g', stateDir: dir, pollMs: 20, input, output, startRun: async () => 'started',
+    assistant: async (_args, prompt) => (prompts.push(prompt), { structured_output: turns.shift(), total_cost_usd: 0 }),
+  }).start();
+  const say = async (l: string) => {
+    input.write(l + '\n');
+    await new Promise((r) => setTimeout(r, 60));
+  };
+  await say('/discuss q1');
+  await say('can we make it daily instead?');
+  await say('yes do it');
+  await say('y');
+  await say('/quit');
+  await chat;
+
+  assert.match(prompts[0], /Help me decide on q1/);
+  assert.match(prompts[0], /Spotify API or scraping charts\?/, 'the waiting question’s brief is in context');
+  assert.match(prompts[0], /propose the revise action only once you both agree/);
+  assert.match(text, /I recommend charts/);
+  assert.match(text, /-- weekly index/, 'the spec diff shows what goes');
+  assert.match(text, /\+- daily index/, 'and what comes');
+  assert.match(text, /Do it\? revise the goal: “Daily instead of weekly”/);
+  const rev = store.events('g', 5, 'human.revise')[0];
+  assert.equal(rev.data.spec_md, '# Songs\n- daily index\n');
+  assert.equal((rev.data.acceptance as any[])[0].criterion, 'Updates daily');
+  assert.equal(rev.data.objective, undefined, 'unchanged parts stay out');
+  assert.equal(store.task('g', 'q1')?.status, 'needs_human', 'discussing does not answer');
+});

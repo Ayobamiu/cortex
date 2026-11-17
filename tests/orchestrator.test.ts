@@ -451,3 +451,33 @@ test('a mid-run instruction reaches the planner once, verbatim', async () => {
   assert.equal((plan.data.steers as number[]).length, 1);
   assert.ok(store.events('steer', 100, 'attempt.started').every((e) => typeof e.data.log === 'string'), 'attempts say where their live log is');
 });
+
+test('a mid-run revision commits the new spec, changes acceptance, replans once, and reopens a finished goal', async () => {
+  const seen: string[] = [];
+  const p = mem('planner', 'p0', (req) => {
+    if (req.prompt.includes('revised the goal')) {
+      seen.push(req.prompt);
+      return ok('', { structured: { tasks: [{ key: 't3', title: 'three', kind: 'code', brief: 'WRITE c.txt z', deps: [], evals: [{ kind: 'command', run: 'test -f c.txt' }] }], cancel: [], notes: 'revised' } });
+    }
+    return ok('', { structured: req.prompt.includes('(no tasks yet)') ? { tasks: twoTasks, cancel: [], notes: 'plan' } : { tasks: [], cancel: [], notes: 'ok' } });
+  });
+  const { store, orch, stateDir } = setup('rev', { planner: p, w: worker('w', 'p1') }, { routing: { plan: 'planner', code: 'w', judge: 'planner' }, context_files: ['SPEC.md'] }, {
+    'SPEC.md': '# v1\n',
+    'cortex.goal.json': '{"id":"rev","objective":"old"}\n',
+  });
+  assert.equal(await orch.run(), 'done');
+  store.revise('rev', { summary: 'Also write c.txt', objective: 'Test goal, plus c.txt', spec_md: '# v2\n- c.txt too', acceptance: [{ kind: 'command', run: 'test -f c.txt' }] });
+
+  const again = new Orchestrator({ store, goal: { ...store.goal('rev')!.config, objective: 'Test goal' }, projectDir: store.goal('rev')!.project_dir, stateDir, agents: { planner: p, w: worker('w', 'p1') }, pollMs: 20 });
+  assert.equal(await again.run(), 'done', 'the revision reopens the done goal and finishes it');
+  assert.equal(seen.length, 1, 'planned with once');
+  assert.match(seen[0], /Also write c\.txt/);
+  assert.match(seen[0], /\+# v2/, 'the planner sees the spec diff');
+  const integration = join(stateDir, 'integration');
+  assert.equal(readFileSync(join(integration, 'SPEC.md'), 'utf8'), '# v2\n- c.txt too\n');
+  assert.equal(JSON.parse(readFileSync(join(integration, 'cortex.goal.json'), 'utf8')).objective, 'Test goal, plus c.txt');
+  assert.ok(existsSync(join(integration, 'c.txt')));
+  assert.equal(store.goal('rev')!.config.objective, 'Test goal, plus c.txt', 'the revision outlives the stale goal file');
+  assert.equal(store.events('rev', 10, 'acceptance').at(-1)!.data.pass, true);
+  assert.equal(store.countEvents('rev', 'spec.revised'), 1);
+});
